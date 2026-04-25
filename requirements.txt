@@ -1,0 +1,5 @@
+modelscope
+librosa
+soundfile
+numpy
+silero-vad

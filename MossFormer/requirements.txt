@@ -1,0 +1,12 @@
+einops
+huggingface-hub
+packaging
+pydub
+python_speech_features
+rotary_embedding_torch
+scipy
+torch
+torchaudio
+torchinfo
+tqdm
+yamlargparse

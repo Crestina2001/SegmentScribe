@@ -1,0 +1,7 @@
+audios/
+checkpoints/
+__pycache__/
+*.pyc
+test_scripts/
+loc_dev.md
+**/loc_dev.md
