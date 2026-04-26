@@ -1,5 +1,14 @@
 modelscope
+huggingface-hub
 librosa
 soundfile
 numpy
 silero-vad
+qwen-asr
+transformers
+accelerate
+sentencepiece
+
+# Optional: required for slide_rule --asr-backend vllm.
+# vLLM is Linux/WSL-oriented and is not available for native Windows pip installs.
+vllm ; platform_system == "Linux"

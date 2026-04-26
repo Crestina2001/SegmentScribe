@@ -1,5 +1,7 @@
 # SegmentScribe
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Small audio prep utilities for converting source audio to numbered WAV files,
 removing music, and enhancing speech with ModelScope ZipEnhancer or
 MossFormer2.
@@ -48,7 +50,7 @@ pip install -r MossFormer/requirements.txt
 Convert a folder of audio files to numbered 16 kHz mono WAV files. This is
 useful when source files have unusual formats or filenames:
 
-```
+```cmd
 python utils/convert_to_numbered_wav.py \
   --input my_wav_folder \
   --output numbered_wavs \
@@ -139,3 +141,86 @@ python MossFormer/enhance_folder.py \
 GPU inference still runs in the main process.
 `--inference-batch-size` batches equal-length MossFormer windows inside each
 long file to improve GPU occupancy; increase it until VRAM use is healthy.
+
+## Download Qwen3 ASR models
+
+Download the ASR and forced-aligner checkpoints before running `slide_rule`.
+ModelScope is the default provider:
+
+```cmd
+python utils/download_qwen3_asr.py \
+  --provider modelscope \
+  --output-root checkpoints
+```
+
+Use Hugging Face instead:
+
+```cmd
+python utils/download_qwen3_asr.py \
+  --provider hf \
+  --output-root checkpoints
+```
+
+This creates:
+
+- `checkpoints/Qwen3-ASR-1.7B`
+- `checkpoints/Qwen3-ForcedAligner-0.6B`
+
+## Rule-based slicing: slide_rule
+
+`slide_rule` cuts prepared speech audio into transcript-aligned segments for
+TTS data preparation. It runs ASR/alignment, rule-based punctuation handling,
+rough segmentation, thin silence-aware trimming, and manifest writing.
+
+Make sure `slide_LLM` and `slide_workflow` are available on `PYTHONPATH`,
+because `slicing_utils` imports the ASR, prepass, rough-cut, and output-writing
+helpers from those modules.
+
+Default `transformers` backend:
+
+```cmd
+python -m slide_rule \
+  --input mossformer_enhanced \
+  --output-dir sliced_segments \
+  --model-path checkpoints/Qwen3-ASR-1.7B \
+  --aligner-path checkpoints/Qwen3-ForcedAligner-0.6B \
+  --asr-backend transformers \
+  --device cuda:0 \
+  --dtype bfloat16 \
+  --asr-max-batch-size 1 \
+  --min-seg-sec 3 \
+  --max-seg-sec 10 \
+  --vad-backend auto \
+  --overwrite
+```
+
+Optional `vllm` backend:
+
+```cmd
+python -m slide_rule \
+  --input mossformer_enhanced \
+  --output-dir sliced_segments \
+  --model-path checkpoints/Qwen3-ASR-1.7B \
+  --aligner-path checkpoints/Qwen3-ForcedAligner-0.6B \
+  --asr-backend vllm \
+  --device cuda:0 \
+  --dtype bfloat16 \
+  --asr-max-batch-size 1 \
+  --min-seg-sec 3 \
+  --max-seg-sec 6 \
+  --overwrite
+```
+
+`vllm` is installed from `requirements.txt` only on Linux/WSL. Use the
+`transformers` backend for native Windows environments.
+
+Useful options:
+
+- `--input`: a single audio file or a directory of audio files.
+- `--output-dir`: output folder for audio clips, transcripts, traces, manifests,
+  and the VoxCPM-style JSONL file.
+- `--model-path`: ASR model path.
+- `--aligner-path`: forced-aligner model path.
+- `--language`: optional language hint passed to the ASR backend.
+- `--dry-run`: run the pipeline without writing final audio clips.
+- `--enable-punctuation-correction`: enable rule-based punctuation edits.
