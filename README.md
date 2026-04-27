@@ -277,3 +277,23 @@ volume too much within the segment. Loud segments may be attenuated by any
 amount. Pruned rows are recorded in
 `pruned_volume_segments.jsonl`; reports are written to `volume_analysis.csv`
 and `normalized_manifest.csv`.
+
+## Filter speaker outliers(optional)
+
+If the dataset should mostly contain one speaker, use SpeechBrain ECAPA speaker
+embeddings to conservatively filter a VoxCPM JSONL manifest:
+
+```cmd
+python speaker_outlier_filter/filter_speaker_outliers.py \
+  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl \
+  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl \
+  --dataset-root audios/zhouquanquan_final_normalized \
+  --device cuda:0 \
+  --overwrite
+```
+
+The tool keeps original audio files untouched and writes only new manifests and
+audit reports. Kept rows are written to
+`zhouquanquan_speaker_filtered.jsonl`, pruned rows are written to
+`pruned_speaker_outliers.jsonl`, and the similarity report plus summary are
+written to `speaker_similarity_report.csv` and `speaker_filter_summary.json`.

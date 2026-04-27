@@ -248,25 +248,6 @@ python -m slide_rule \
 - `--dry-run`: 运行流程但不写最终音频片段。
 - `--enable-punctuation-correction`: 启用规则标点修正。
 
-## 过滤说话人异常片段（可选）
-
-如果数据集应该主要来自同一个说话人，可以用 SpeechBrain ECAPA 说话人嵌入对 VoxCPM JSONL
-做保守过滤：
-
-```cmd
-python speaker_outlier_filter/filter_speaker_outliers.py \
-  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl \
-  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl \
-  --dataset-root audios/zhouquanquan_final_normalized \
-  --device cuda:0 \
-  --overwrite
-```
-
-工具会保留原始音频文件，只写新的 JSONL 和审计报告。过滤结果写入
-`zhouquanquan_speaker_filtered.jsonl`，被剪掉的行写入
-`pruned_speaker_outliers.jsonl`，相似度明细和摘要分别写入
-`speaker_similarity_report.csv` 与 `speaker_filter_summary.json`。
-
 ## 最终音量归一化（可选）
 
 `slide_rule` 生成短训练片段后，可以按片段测量响度，把安全片段归一化到固定 LUFS
@@ -285,6 +266,25 @@ python utils/normalize_corpus_volume.py \
 归一化后可能削波、有效语音太少，或片段内部音量变化过大的行会被剪掉；过响片段可以被任意幅度衰减。
 被剪掉的行写入 `pruned_volume_segments.jsonl`，报告写入
 `volume_analysis.csv` 和 `normalized_manifest.csv`。
+
+## 过滤说话人异常片段（可选）
+
+如果数据集应该主要来自同一个说话人，可以用 SpeechBrain ECAPA 说话人嵌入对 VoxCPM JSONL
+做保守过滤：
+
+```cmd
+python speaker_outlier_filter/filter_speaker_outliers.py \
+  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl \
+  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl \
+  --dataset-root audios/zhouquanquan_final_normalized \
+  --device cuda:0 \
+  --overwrite
+```
+
+工具会保留原始音频文件，只写新的 JSONL 和审计报告。过滤结果写入
+`zhouquanquan_speaker_filtered.jsonl`，被剪掉的行写入
+`pruned_speaker_outliers.jsonl`，相似度明细和摘要分别写入
+`speaker_similarity_report.csv` 与 `speaker_filter_summary.json`。
 
 ## 输出结果
 
