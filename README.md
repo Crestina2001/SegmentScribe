@@ -2,9 +2,10 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Small audio prep utilities for converting source audio to numbered WAV files,
-removing music, and enhancing speech with ModelScope ZipEnhancer or
-MossFormer2.
+SegmentScribe converts raw training audio into VoxCPM-compatible training
+segments. It prepares source audio as numbered WAV files, optionally removes
+background music, enhances speech with ModelScope ZipEnhancer or MossFormer2,
+and slices transcript-aligned segments with manifests for downstream training.
 
 ## Setup
 
@@ -25,6 +26,34 @@ Install the Python dependencies:
 ```cmd
 pip install -r requirements.txt
 ```
+
+## WebUI
+
+Launch the local browser UI:
+
+```cmd
+python webui.py
+```
+
+The WebUI can run the same pipeline stages described below:
+
+- transform source audio into numbered 16 kHz mono WAV files;
+- remove background music with Demucs;
+- denoise speech with MossFormer2 or ZipEnhancer;
+- slice audio with `slide_rule`;
+- review `summary.json`, `manifest.tsv`, transcripts, and segment audio;
+- filter wrong-speaker outliers from VoxCPM JSONL manifests;
+- normalize final segment loudness into a new safe dataset folder.
+
+Download the WebUI's default model checkpoints:
+
+```cmd
+python utils/download_model_webui.py --models all
+```
+
+This prepares the default WebUI paths under `checkpoints/` for MossFormer2,
+Qwen3-ASR, and the Qwen3 forced aligner. The same download command is also
+available from the WebUI's **Models** tab.
 
 Install `ffmpeg` for audio conversion and non-WAV inputs:
 
@@ -224,3 +253,27 @@ Useful options:
 - `--language`: optional language hint passed to the ASR backend.
 - `--dry-run`: run the pipeline without writing final audio clips.
 - `--enable-punctuation-correction`: enable rule-based punctuation edits.
+
+## Final volume normalization(optional)
+
+After `slide_rule` creates many short training segments, normalize volume at the
+segment level and write a new safe dataset folder:
+
+```cmd
+python utils/normalize_corpus_volume.py \
+  --input sliced_segments \
+  --output normalized_segments \
+  --target-lufs -20 \
+  --max-volume-change-db 12 \
+  --overwrite
+```
+
+The normalizer reads the `*_voxcpm.jsonl` file, measures only the segment audio
+listed there, normalizes kept segments to the fixed LUFS target, and writes
+normalized WAVs plus an updated JSONL under the new output folder. Segments are
+pruned when they need more upward gain than `--max-volume-change-db` to reach
+the target, would clip after gain, have too little active audio, or change
+volume too much within the segment. Loud segments may be attenuated by any
+amount. Pruned rows are recorded in
+`pruned_volume_segments.jsonl`; reports are written to `volume_analysis.csv`
+and `normalized_manifest.csv`.

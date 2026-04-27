@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # When concatenating chunk texts into one document we insert a whitespace
 # delimiter; punctuation/whitespace are ignored by every downstream mapping so
 # this does not affect char<->text alignment.
-CHUNK_TEXT_DELIMITER = "\n"
+CHUNK_TEXT_DELIMITER = " "
 
 
 @dataclass

@@ -33,6 +33,7 @@ _MAYBE_SLACK_SEC = 0.35
 _MAX_SEARCH_OVERSHOOT_SEC = 8.0
 _ANCHOR_MIN_SEC = 15.0
 _ANCHOR_MAX_SEC = 30.0
+_MAX_BOUNDARY_PADDING_SEC = 0.1
 
 
 @dataclass
@@ -140,6 +141,24 @@ def _length_tier(
 def _deviation_ms(trimmed_sec: float, min_seg_sec: float, max_seg_sec: float) -> int:
     target = (min_seg_sec + max_seg_sec) * 0.5
     return int(round(abs(trimmed_sec - target) * 1000.0))
+
+
+def _segment_start_sec(chars: Sequence[CharToken], token_idx: int) -> float:
+    current_start = float(chars[token_idx].start_sec)
+    if token_idx <= 0:
+        return current_start
+    previous_end = float(chars[token_idx - 1].end_sec)
+    midpoint = previous_end + (current_start - previous_end) * 0.5
+    return max(midpoint, current_start - _MAX_BOUNDARY_PADDING_SEC)
+
+
+def _segment_end_sec(chars: Sequence[CharToken], token_idx: int) -> float:
+    current_end = float(chars[token_idx].end_sec)
+    if token_idx + 1 >= len(chars):
+        return current_end
+    next_start = float(chars[token_idx + 1].start_sec)
+    midpoint = current_end + (next_start - current_end) * 0.5
+    return min(midpoint, current_end + _MAX_BOUNDARY_PADDING_SEC)
 
 
 def _estimate_trimmed_duration_sec(
@@ -299,7 +318,7 @@ def _choose_anchor_boundary(
     boundaries: Sequence[RoughBoundary],
     chars: Sequence[CharToken],
 ) -> Optional[RoughBoundary]:
-    start_sec = float(chars[start_token_idx].start_sec)
+    start_sec = _segment_start_sec(chars, start_token_idx)
     in_window: list[RoughBoundary] = []
     before_max: list[RoughBoundary] = []
     for boundary in boundaries:
@@ -307,11 +326,7 @@ def _choose_anchor_boundary(
             continue
         if boundary.cut_policy == "no_cut":
             continue
-        raw_end_sec = (
-            boundary.next_token_start_sec
-            if boundary.boundary_kind != "final"
-            else boundary.cut_sec
-        )
+        raw_end_sec = _segment_end_sec(chars, boundary.token_idx)
         duration_sec = raw_end_sec - start_sec
         if duration_sec <= _ANCHOR_MAX_SEC + 1e-6:
             before_max.append(boundary)
@@ -322,11 +337,7 @@ def _choose_anchor_boundary(
         return None
 
     tail_boundary = before_max[-1]
-    tail_end_sec = (
-        tail_boundary.next_token_start_sec
-        if tail_boundary.boundary_kind != "final"
-        else tail_boundary.cut_sec
-    )
+    tail_end_sec = _segment_end_sec(chars, tail_boundary.token_idx)
     if tail_end_sec - start_sec <= _ANCHOR_MAX_SEC + 1e-6 and tail_boundary.boundary_kind == "final":
         return tail_boundary
 
@@ -422,12 +433,8 @@ def _plan_segments(
                 if seg_token_end < seg_token_start or seg_token_start >= len(chars):
                     continue
 
-                seg_start_sec = float(chars[seg_token_start].start_sec)
-                raw_end_sec = (
-                    boundary.next_token_start_sec
-                    if boundary.boundary_kind != "final"
-                    else boundary.cut_sec
-                )
+                seg_start_sec = _segment_start_sec(chars, seg_token_start)
+                raw_end_sec = _segment_end_sec(chars, seg_token_end)
                 raw_sec = max(0.0, raw_end_sec - seg_start_sec)
                 if raw_sec > max_seg_sec + _MAX_SEARCH_OVERSHOOT_SEC:
                     continue
@@ -460,7 +467,7 @@ def _plan_segments(
                         "char_start_idx": seg_token_start,
                         "char_end_idx": seg_token_end,
                         "start_sec": seg_start_sec,
-                        "end_sec": float(chars[seg_token_end].end_sec),
+                        "end_sec": raw_end_sec,
                         "raw_duration_sec": round(raw_sec, 3),
                         "trimmed_duration_sec": round(trimmed_sec, 3),
                         "length_tier": (
@@ -476,7 +483,7 @@ def _plan_segments(
                         "boundary_text": boundary.boundary_text,
                         "pause_ms": boundary.pause_ms,
                         "anchor_candidate_id": anchor_boundary.candidate_id,
-                        "anchor_window_start_sec": round(float(chars[start_token_idx].start_sec), 3),
+                        "anchor_window_start_sec": round(_segment_start_sec(chars, start_token_idx), 3),
                         "anchor_window_end_sec": round(raw_end_sec, 3),
                         "reason": _segment_reason(
                             boundary=boundary,

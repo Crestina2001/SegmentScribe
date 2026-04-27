@@ -3,5 +3,7 @@ checkpoints/
 __pycache__/
 *.pyc
 test_scripts/
+tests/
 loc_dev.md
 **/loc_dev.md
+webui_server*.log

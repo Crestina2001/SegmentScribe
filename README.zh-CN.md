@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-SegmentScribe 是一组语音数据准备工具，用于把原始音频整理成编号 WAV、去除背景音乐、增强人声，并通过 `slide_rule` 切分成适合 TTS 训练的转写对齐片段。
+SegmentScribe 用于将原始训练音频转换为 VoxCPM 兼容的训练片段。它会把源音频整理成编号 WAV，按需去除背景音乐，使用 ModelScope ZipEnhancer 或 MossFormer2 增强人声，并通过 `slide_rule` 切分出带转写对齐信息和清单文件的下游训练片段。
 
 ## 环境安装
 
@@ -24,6 +24,33 @@ conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvi
 ```cmd
 pip install -r requirements.txt
 ```
+
+## WebUI
+
+启动本地浏览器界面：
+
+```cmd
+python webui.py
+```
+
+WebUI 可以运行下文介绍的主要流程：
+
+- 将源音频转换为编号的 16 kHz 单声道 WAV；
+- 使用 Demucs 去除背景音乐；
+- 使用 MossFormer2 或 ZipEnhancer 做语音增强；
+- 通过 `slide_rule` 切分音频；
+- 查看 `summary.json`、`manifest.tsv`、转写文本和片段音频；
+- 从 VoxCPM JSONL 中过滤疑似错误说话人的片段；
+- 将最终片段音量归一化到新的安全数据集目录。
+
+下载 WebUI 默认使用的模型 checkpoint：
+
+```cmd
+python utils/download_model_webui.py --models all
+```
+
+该命令会在 `checkpoints/` 下准备 MossFormer2、Qwen3-ASR 和 Qwen3 forced aligner
+的默认路径。WebUI 的 **Models** 标签页中也提供同样的下载入口。
 
 安装 `ffmpeg`，用于音频格式转换和处理非 WAV 输入：
 
@@ -220,6 +247,44 @@ python -m slide_rule \
 - `--language`: 可选语言提示，会传给 ASR 后端。
 - `--dry-run`: 运行流程但不写最终音频片段。
 - `--enable-punctuation-correction`: 启用规则标点修正。
+
+## 过滤说话人异常片段（可选）
+
+如果数据集应该主要来自同一个说话人，可以用 SpeechBrain ECAPA 说话人嵌入对 VoxCPM JSONL
+做保守过滤：
+
+```cmd
+python speaker_outlier_filter/filter_speaker_outliers.py \
+  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl \
+  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl \
+  --dataset-root audios/zhouquanquan_final_normalized \
+  --device cuda:0 \
+  --overwrite
+```
+
+工具会保留原始音频文件，只写新的 JSONL 和审计报告。过滤结果写入
+`zhouquanquan_speaker_filtered.jsonl`，被剪掉的行写入
+`pruned_speaker_outliers.jsonl`，相似度明细和摘要分别写入
+`speaker_similarity_report.csv` 与 `speaker_filter_summary.json`。
+
+## 最终音量归一化（可选）
+
+`slide_rule` 生成短训练片段后，可以按片段测量响度，把安全片段归一化到固定 LUFS
+目标，并写入新的数据集目录：
+
+```cmd
+python utils/normalize_corpus_volume.py \
+  --input sliced_segments \
+  --output normalized_segments \
+  --target-lufs -20 \
+  --max-volume-change-db 12 \
+  --overwrite
+```
+
+归一化工具会读取 `*_voxcpm.jsonl`，只处理其中列出的片段音频。需要过大向上增益、
+归一化后可能削波、有效语音太少，或片段内部音量变化过大的行会被剪掉；过响片段可以被任意幅度衰减。
+被剪掉的行写入 `pruned_volume_segments.jsonl`，报告写入
+`volume_analysis.csv` 和 `normalized_manifest.csv`。
 
 ## 输出结果
 

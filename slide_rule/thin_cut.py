@@ -11,6 +11,7 @@ from slicing_utils.rough_cut import RoughSegment
 
 
 TRIM_TOP_DB = 60
+TRIM_PADDING_SEC = 0.1
 
 
 @dataclass
@@ -65,6 +66,7 @@ def run_thin_cut_phase(
     sample_rate: int,
     segments: Sequence[RoughSegment],
     top_db: int = TRIM_TOP_DB,
+    padding_sec: float = TRIM_PADDING_SEC,
 ) -> Phase4Result:
     result = Phase4Result()
     for seg_idx, rough in enumerate(segments, start=1):
@@ -74,6 +76,7 @@ def run_thin_cut_phase(
             rough=rough,
             segment_index=seg_idx,
             top_db=top_db,
+            padding_sec=padding_sec,
         )
         result.refined.append(refined)
         result.traces.append(
@@ -88,6 +91,7 @@ def run_thin_cut_phase(
                     "trim_start_sample": trace.trim_start_sample,
                     "trim_end_sample": trace.trim_end_sample,
                     "top_db": trace.top_db,
+                    "padding_sec": padding_sec,
                 },
                 applied_cut_start_sec=refined.cut_start_sec,
                 applied_cut_end_sec=refined.cut_end_sec,
@@ -106,6 +110,7 @@ def _trim_one_segment(
     rough: RoughSegment,
     segment_index: int,
     top_db: int,
+    padding_sec: float,
 ) -> tuple[RefinedSegment, ThinCutTrace]:
     start_sample = max(0, int(round(float(rough.start_sec) * sample_rate)))
     end_sample = min(len(audio), max(start_sample, int(round(float(rough.end_sec) * sample_rate))))
@@ -131,15 +136,18 @@ def _trim_one_segment(
 
     trim_start = int(index[0])
     trim_end = int(index[1])
-    trimmed_start_sec = (start_sample + trim_start) / float(sample_rate)
-    trimmed_end_sec = (start_sample + trim_end) / float(sample_rate)
-    trimmed_rough = replace(rough, start_sec=trimmed_start_sec)
+    padding_samples = max(0, int(round(float(padding_sec) * sample_rate)))
+    padded_start = max(0, trim_start - padding_samples)
+    padded_end = min(len(seg_audio), trim_end + padding_samples)
+    padded_start_sec = (start_sample + padded_start) / float(sample_rate)
+    padded_end_sec = (start_sample + padded_end) / float(sample_rate)
+    trimmed_rough = replace(rough, start_sec=padded_start_sec)
     refined = RefinedSegment(
         rough=trimmed_rough,
-        cut_start_sec=trimmed_end_sec,
-        cut_end_sec=trimmed_end_sec,
-        duration_sec=max(0.0, trimmed_end_sec - trimmed_start_sec),
-        zoom_reason=f"librosa.trim(top_db={top_db})",
+        cut_start_sec=padded_end_sec,
+        cut_end_sec=padded_end_sec,
+        duration_sec=max(0.0, padded_end_sec - padded_start_sec),
+        zoom_reason=f"librosa.trim(top_db={top_db}, padding_sec={padding_sec:g})",
         zoom_error=None,
         zoom_id=f"thin_{segment_index:06d}",
     )
@@ -147,10 +155,10 @@ def _trim_one_segment(
         segment_index=segment_index,
         original_start_sec=float(rough.start_sec),
         original_end_sec=float(rough.end_sec),
-        trimmed_start_sec=trimmed_start_sec,
-        trimmed_end_sec=trimmed_end_sec,
-        trim_start_sample=trim_start,
-        trim_end_sample=trim_end,
+        trimmed_start_sec=padded_start_sec,
+        trimmed_end_sec=padded_end_sec,
+        trim_start_sample=padded_start,
+        trim_end_sample=padded_end,
         top_db=top_db,
         error=None,
     )

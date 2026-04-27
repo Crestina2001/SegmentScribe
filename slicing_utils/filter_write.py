@@ -115,7 +115,7 @@ def transcript_for_segment(
         corrected_full_text[end_pos]
     ):
         end_pos += 1
-    return corrected_full_text[start_pos:end_pos].strip()
+    return corrected_full_text[start_pos:end_pos].replace("\r\n", " ").replace("\n", " ").strip()
 
 
 def run_filter_write_phase(

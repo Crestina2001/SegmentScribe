@@ -3,11 +3,14 @@ huggingface-hub
 librosa
 soundfile
 numpy
+pyloudnorm
 silero-vad
 qwen-asr
 transformers
 accelerate
 sentencepiece
+gradio
+speechbrain
 
 # Optional: required for slide_rule --asr-backend vllm.
 # vLLM is Linux/WSL-oriented and is not available for native Windows pip installs.
