@@ -13,6 +13,14 @@ RULE_SLICE_MODE = "Rule-based"
 LLM_SLICE_MODE = "LLM-assisted"
 SLICE_MODES = (RULE_SLICE_MODE, LLM_SLICE_MODE)
 LLM_PROVIDERS = ("", "openai", "minimax", "anthropic", "gemini", "deepseek")
+MODEL_REPO_PREFIXES = ("Qwen/", "alibabasglab/")
+
+
+def resolve_model_arg(raw_value: str) -> str:
+    value = (raw_value or "").strip()
+    if value.startswith(MODEL_REPO_PREFIXES):
+        return value
+    return str(resolve_path(value))
 
 
 def conversion_command(
@@ -297,9 +305,9 @@ def _base_slice_command(
         "--output-dir",
         str(output),
         "--model-path",
-        str(resolve_path(model_path)),
+        resolve_model_arg(model_path),
         "--aligner-path",
-        str(resolve_path(aligner_path)),
+        resolve_model_arg(aligner_path),
         "--asr-backend",
         backend,
         "--device",
@@ -519,7 +527,7 @@ def volume_normalize_command(
 def model_download_command(
     models: list[str],
     provider: str,
-    output_root: str,
+    download_path: str,
     asr_dir: str,
     aligner_dir: str,
     mossformer_path: str,
@@ -528,13 +536,13 @@ def model_download_command(
     selected = models or ["all"]
     command = [
         sys.executable,
-        script_path("utils", "download_model_webui.py"),
+        script_path("utils", "download_models.py"),
         "--models",
         *selected,
         "--provider",
         provider,
-        "--output-root",
-        str(resolve_path(output_root)),
+        "--download-path",
+        str(resolve_path(download_path)),
         "--asr-dir",
         asr_dir,
         "--aligner-dir",

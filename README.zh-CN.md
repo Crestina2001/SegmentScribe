@@ -46,7 +46,7 @@ WebUI 可以运行下文介绍的主要流程：
 下载 WebUI 默认使用的模型 checkpoint：
 
 ```cmd
-python utils/download_model_webui.py --models all
+python utils/download_models.py --models all --download_path checkpoints
 ```
 
 该命令会在 `checkpoints/` 下准备 MossFormer2、Qwen3-ASR 和 Qwen3 forced aligner

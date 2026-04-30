@@ -25,6 +25,8 @@ QWEN_MODELS = {
     "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
 }
 MOSSFORMER_REPO = "alibabasglab/MossFormer2_SE_48K"
+DEFAULT_DOWNLOAD_PATH = Path("checkpoints")
+DEFAULT_MOSSFORMER_DIR = Path("MossFormer2_SE_48K")
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,15 +42,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--provider",
-        choices=("modelscope", "hf"),
+        choices=("modelscope", "huggingface", "hf"),
         default="modelscope",
         help="Provider for Qwen3 ASR/aligner downloads. Default: modelscope.",
     )
     parser.add_argument(
-        "--output-root",
+        "--download-path",
+        "--download_path",
         type=Path,
-        default=Path("checkpoints"),
-        help="Root checkpoint folder used by the WebUI. Default: checkpoints.",
+        default=DEFAULT_DOWNLOAD_PATH,
+        help="Root folder for Hugging Face and ModelScope downloads. Default: checkpoints.",
+    )
+    parser.add_argument(
+        "--output-root",
+        dest="download_path",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--asr-dir",
@@ -65,8 +75,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mossformer-path",
         type=Path,
-        default=Path("checkpoints/MossFormer2_SE_48K"),
-        help="MossFormer checkpoint folder used by the WebUI.",
+        default=None,
+        help="MossFormer checkpoint folder. Default: <download-path>/MossFormer2_SE_48K.",
     )
     parser.add_argument(
         "--force",
@@ -86,10 +96,10 @@ def resolve_path(path: Path, root: Path) -> Path:
     return root / path
 
 
-def resolve_model_dir(output_root: Path, model_dir: Path, root: Path) -> Path:
+def resolve_model_dir(download_path: Path, model_dir: Path, root: Path) -> Path:
     if model_dir.is_absolute():
         return model_dir
-    return resolve_path(output_root, root) / model_dir
+    return resolve_path(download_path, root) / model_dir
 
 
 def selected_models(raw_models: list[str]) -> set[str]:
@@ -177,21 +187,23 @@ def print_webui_paths(asr_dir: Path, aligner_dir: Path, mossformer_dir: Path) ->
 def main() -> None:
     args = parse_args()
     root = project_root()
-    output_root = resolve_path(args.output_root, root)
-    asr_dir = resolve_model_dir(args.output_root, args.asr_dir, root).resolve()
-    aligner_dir = resolve_model_dir(args.output_root, args.aligner_dir, root).resolve()
-    mossformer_dir = resolve_path(args.mossformer_path, root).resolve()
+    download_path = resolve_path(args.download_path, root)
+    asr_dir = resolve_model_dir(args.download_path, args.asr_dir, root).resolve()
+    aligner_dir = resolve_model_dir(args.download_path, args.aligner_dir, root).resolve()
+    mossformer_path = args.mossformer_path or args.download_path / DEFAULT_MOSSFORMER_DIR
+    mossformer_dir = resolve_path(mossformer_path, root).resolve()
+    provider = "huggingface" if args.provider == "hf" else args.provider
 
     targets = selected_models(args.models)
     if "asr" in targets:
-        download_qwen("asr", args.provider, asr_dir, args.force)
+        download_qwen("asr", provider, asr_dir, args.force)
     if "aligner" in targets:
-        download_qwen("aligner", args.provider, aligner_dir, args.force)
+        download_qwen("aligner", provider, aligner_dir, args.force)
     if "mossformer" in targets:
         download_mossformer(mossformer_dir, args.force)
 
     print_webui_paths(asr_dir, aligner_dir, mossformer_dir)
-    print(f"\nCheckpoint root: {output_root.resolve()}")
+    print(f"\nDownload path: {download_path.resolve()}")
     print("Done.")
 
 

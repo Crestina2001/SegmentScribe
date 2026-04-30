@@ -4,9 +4,9 @@ The wrapper exposes a :class:`WindowTranscript` with per-character timestamps
 in seconds, relative to the window start. Callers translate to absolute time
 by adding the window cursor.
 
-Model paths may be either a local directory or a ModelScope / HuggingFace
-repo id. Non-directory inputs are resolved through ``modelscope.snapshot_download``
-so that users in Mainland China can pass e.g. ``Qwen/Qwen3-ASR-1.7B`` directly.
+Model paths may be either a local directory or a ModelScope / Hugging Face
+repo id. Non-directory inputs are resolved through ModelScope first, then
+Hugging Face, so users can pass e.g. ``Qwen/Qwen3-ASR-1.7B`` directly.
 """
 
 from __future__ import annotations
@@ -28,9 +28,9 @@ def resolve_model_path(path: str, *, label: str = "model") -> str:
 
     Resolution order:
       1. If ``path`` expands to an existing directory, return that directory.
-      2. Otherwise, try ``modelscope.snapshot_download(path)`` and return the
-         local cache directory it produces. This lets users pass ModelScope
-         repo ids (e.g. ``Qwen/Qwen3-ASR-1.7B``) directly.
+      2. Otherwise, try ModelScope, then Hugging Face snapshot downloads and
+         return the local cache directory. This lets users pass repo ids
+         (e.g. ``Qwen/Qwen3-ASR-1.7B``) directly.
       3. If both fail, raise :class:`SystemExit` with a helpful error.
     """
     if not path or not str(path).strip():
@@ -40,27 +40,44 @@ def resolve_model_path(path: str, *, label: str = "model") -> str:
     if local.is_dir():
         return str(local)
 
+    errors: list[str] = []
     try:
-        from modelscope import snapshot_download
+        from modelscope import snapshot_download as modelscope_snapshot_download
+
+        try:
+            resolved = modelscope_snapshot_download(str(path))
+            print(
+                f"[slide_LLM] Resolved {label} '{path}' via modelscope -> {resolved}",
+                file=sys.stderr,
+            )
+            return str(resolved)
+        except Exception as exc:
+            errors.append(f"ModelScope rejected it: {exc}")
     except ImportError as exc:
-        raise SystemExit(
-            f"{label} path '{path}' is not a local directory and the 'modelscope' "
-            f"package is not installed. Either pass an existing local directory, or "
-            f"install modelscope with: pip install -U modelscope"
-        ) from exc
+        errors.append(f"ModelScope package is not installed: {exc}")
 
     try:
-        resolved = snapshot_download(str(path))
-    except Exception as exc:
-        raise SystemExit(
-            f"Failed to resolve {label} path '{path}'. It is not an existing local "
-            f"directory, and modelscope.snapshot_download rejected it: {exc}. "
-            f"Either (a) run 'modelscope download --model {path} --local_dir ./some_dir' "
-            f"and pass './some_dir', or (b) pass the directory you already downloaded to."
-        ) from exc
+        from huggingface_hub import snapshot_download as hf_snapshot_download
 
-    print(f"[slide_LLM] Resolved {label} '{path}' via modelscope -> {resolved}", file=sys.stderr)
-    return str(resolved)
+        try:
+            resolved = hf_snapshot_download(repo_id=str(path))
+            print(
+                f"[slide_LLM] Resolved {label} '{path}' via Hugging Face -> {resolved}",
+                file=sys.stderr,
+            )
+            return str(resolved)
+        except Exception as exc:
+            errors.append(f"Hugging Face rejected it: {exc}")
+    except ImportError as exc:
+        errors.append(f"huggingface_hub package is not installed: {exc}")
+
+    detail = "\n  - ".join(errors)
+    raise SystemExit(
+        f"Failed to resolve {label} path '{path}'. It is not an existing local "
+        f"directory, and no model hub accepted it.\n  - {detail}\n"
+        f"Either download the model first and pass the local directory, or pass a "
+        f"valid ModelScope/Hugging Face repo id."
+    )
 
 
 @dataclass(frozen=True)

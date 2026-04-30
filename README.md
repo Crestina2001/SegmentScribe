@@ -48,7 +48,7 @@ The WebUI can run the same pipeline stages described below:
 Download the WebUI's default model checkpoints:
 
 ```cmd
-python utils/download_model_webui.py --models all
+python utils/download_models.py --models all --download_path checkpoints
 ```
 
 This prepares the default WebUI paths under `checkpoints/` for MossFormer2,

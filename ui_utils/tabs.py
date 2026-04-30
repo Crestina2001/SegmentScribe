@@ -426,8 +426,8 @@ def _build_models_tab() -> None:
     with gr.Tab("Models"):
         gr.Markdown("Download checkpoints into the default folders used by the WebUI.")
         download_models = gr.CheckboxGroup(["all", "qwen3", "asr", "aligner", "mossformer"], value=["all"], label="Models")
-        download_provider = gr.Dropdown(["modelscope", "hf"], value="modelscope", label="Qwen3 download provider")
-        download_output_root = gr.Textbox(label="Checkpoint root", value=str(PROJECT_ROOT / "checkpoints"))
+        download_provider = gr.Dropdown(["modelscope", "huggingface"], value="modelscope", label="Qwen3 download provider")
+        download_path = gr.Textbox(label="Download path", value=str(PROJECT_ROOT / "checkpoints"))
         download_asr_dir = gr.Textbox(label="ASR directory name", value="Qwen3-ASR-1.7B")
         download_aligner_dir = gr.Textbox(label="Aligner directory name", value="Qwen3-ForcedAligner-0.6B")
         download_mossformer_path = gr.Textbox(label="MossFormer checkpoint path", value=str(PROJECT_ROOT / "checkpoints" / "MossFormer2_SE_48K"))
@@ -437,10 +437,10 @@ def _build_models_tab() -> None:
         download_force = gr.Checkbox(label="Force re-download", value=False)
         download_button = gr.Button("Download models", variant="primary")
         download_log = gr.Textbox(label="Download log", lines=18)
-        browse_download_root.click(browse_folder, inputs=download_output_root, outputs=download_output_root)
+        browse_download_root.click(browse_folder, inputs=download_path, outputs=download_path)
         browse_download_mossformer.click(browse_folder, inputs=download_mossformer_path, outputs=download_mossformer_path)
         download_button.click(
             run_model_download,
-            inputs=[download_models, download_provider, download_output_root, download_asr_dir, download_aligner_dir, download_mossformer_path, download_force],
+            inputs=[download_models, download_provider, download_path, download_asr_dir, download_aligner_dir, download_mossformer_path, download_force],
             outputs=download_log,
         )

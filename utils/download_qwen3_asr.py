@@ -25,12 +25,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--provider",
-        choices=("modelscope", "hf"),
+        choices=("modelscope", "huggingface", "hf"),
         default="modelscope",
         help="Model hub to use. Default: modelscope.",
     )
     parser.add_argument(
         "--output-root",
+        "--download-path",
+        "--download_path",
+        dest="output_root",
         type=Path,
         default=Path("checkpoints"),
         help="Directory that will contain both model folders. Default: checkpoints.",
@@ -125,7 +128,8 @@ def main() -> None:
         ensure_download_allowed(destination, args.force)
         print(f"Downloading {model_id}")
         print(f"Destination: {destination}")
-        if args.provider == "modelscope":
+        provider = "huggingface" if args.provider == "hf" else args.provider
+        if provider == "modelscope":
             download_with_modelscope(model_id, destination)
         else:
             download_with_hf(model_id, destination)
