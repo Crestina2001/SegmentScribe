@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 from slicing_utils.asr import CharToken
-from slicing_utils.prepass import FullPrepass
+from slicing_utils.prepass import FullPrepass, pause_ms_after_token
 from slicing_utils.shared import (
     canonical_nonpunct,
     is_punct_or_space,
@@ -63,7 +63,7 @@ def run_rule_punctuation_phase(prepass: FullPrepass) -> RulePunctuationResult:
         if not positions:
             continue
         run_start, run_end, punct_run = _punctuation_run_after(full_text, max(positions))
-        pause_ms = max(0.0, (float(right.start_sec) - float(left.end_sec)) * 1000.0)
+        pause_ms = pause_ms_after_token(prepass, token_idx)
         category = pause_category_after_token(full_text, token_to_positions, token_idx)
 
         if category == "strong" and pause_ms <= strong_short_ms and punct_run:

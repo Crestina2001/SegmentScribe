@@ -171,6 +171,23 @@ GPU inference still runs in the main process.
 `--inference-batch-size` batches equal-length MossFormer windows inside each
 long file to improve GPU occupancy; increase it until VRAM use is healthy.
 
+## Optional: pre-split long denoised audio
+
+For very long denoised files, split them before `slide_LLM` so each source
+handed to ASR/LLM is closer to five minutes. The splitter searches a 60-second
+window around each ideal cut and chooses the longest low-energy silence span.
+
+```cmd
+python utils/auto_slice_long_audio.py \
+  --input mossformer_enhanced \
+  --output mossformer_enhanced_presliced \
+  --target-piece-seconds 300 \
+  --search-window-seconds 60 \
+  --overwrite
+```
+
+Then pass `mossformer_enhanced_presliced` as the slicing input.
+
 ## Download Qwen3 ASR models
 
 Download the ASR and forced-aligner checkpoints before running `slide_rule`.
@@ -253,6 +270,62 @@ Useful options:
 - `--language`: optional language hint passed to the ASR backend.
 - `--dry-run`: run the pipeline without writing final audio clips.
 - `--enable-punctuation-correction`: enable rule-based punctuation edits.
+
+## LLM-assisted slicing: slide_LLM
+
+`slide_LLM` uses the same ASR/alignment pre-pass, silence-aware thin cut,
+output writer, manifest, and trace layout as `slide_rule`, but asks an LLM to
+handle punctuation correction and rough segmentation decisions. Configure your
+LLM provider in `.env` first; see `.env.example` for OpenAI-compatible,
+Gemini-compatible, MiniMax, Anthropic, and DeepSeek keys/base URLs.
+
+Example with Gemini through the bundled LLM gateway:
+
+```cmd
+python -m slide_LLM \
+  --input mossformer_enhanced \
+  --output-dir sliced_segments_llm \
+  --model-path checkpoints/Qwen3-ASR-1.7B \
+  --aligner-path checkpoints/Qwen3-ForcedAligner-0.6B \
+  --asr-backend transformers \
+  --device cuda:0 \
+  --dtype bfloat16 \
+  --asr-max-batch-size 1 \
+  --llm-concurrency 8 \
+  --min-seg-sec 3 \
+  --max-seg-sec 10 \
+  --vad-backend auto \
+  --llm-model gemini-2.5-flash \
+  --llm-provider gemini \
+  --env-path .env \
+  --overwrite
+```
+
+Useful LLM options:
+
+- `--llm-model`: required default model for both LLM phases.
+- `--punct-llm-model`: optional override for punctuation correction.
+- `--rough-llm-model`: optional override for rough cut planning.
+- `--llm-provider`: optional provider name; if omitted, the gateway tries to
+  infer it from the model name.
+- `--env-path`: optional path to the `.env` file containing provider keys.
+- `--llm-max-rounds`: max rough-cut repair rounds after a length error
+  (default: `5`).
+- `--asr-max-batch-size`: maximum number of pre-pass ASR chunks in one global
+  ASR inference batch (default: `1`). When one source has fewer remaining
+  chunks than the batch capacity, chunks from the next ready source can fill the
+  same ASR batch.
+- `--llm-concurrency`: maximum number of `slide_LLM` LLM calls in flight at
+  once (default: `8`). The gateway's provider/model/global rate limits still
+  apply underneath this cap.
+
+When `--input` is a directory, `slide_LLM` schedules audio files concurrently
+across a global ASR batcher and an LLM pool. Each source still runs in phase
+order, but ASR batches can be filled with chunks from multiple audios, and one
+file can be in ASR while other files are waiting on punctuation or rough-cut LLM
+calls. Output directories are keyed by source filename stem, so duplicate stems
+in different subdirectories are rejected before processing to avoid trace/audio
+collisions.
 
 ## Final volume normalization(optional)
 

@@ -1,16 +1,34 @@
-modelscope
-huggingface-hub
-librosa
-soundfile
-numpy
-pyloudnorm
-silero-vad
-qwen-asr
-transformers
-accelerate
-sentencepiece
-gradio
-speechbrain
+modelscope==1.35.3
+huggingface-hub==0.36.2
+librosa==0.11.0
+soundfile==0.13.1
+numpy==2.2.6
+scipy==1.17.1
+pyloudnorm==0.2.0
+python-dotenv==1.2.2
+httpx==0.28.1
+openai==2.30.0
+langfuse==4.3.1
+silero-vad==6.2.1
+qwen-asr==0.0.6
+transformers==4.57.6
+accelerate==1.12.0
+sentencepiece==0.2.1
+gradio==6.10.0
+speechbrain==1.1.0
+
+# Audio enhancement / separation dependencies used by MossFormer and music_removal.
+demucs==4.0.1
+einops==0.8.2
+packaging==25.0
+pydub==0.25.1
+python_speech_features==0.6
+rotary-embedding-torch==0.8.9
+torch
+torchaudio
+torchinfo==1.8.0
+tqdm==4.67.3
+yamlargparse==1.31.1
 
 # Optional: required for slide_rule --asr-backend vllm.
 # vLLM is Linux/WSL-oriented and is not available for native Windows pip installs.

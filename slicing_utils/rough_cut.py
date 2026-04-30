@@ -24,7 +24,7 @@ import numpy as np
 
 from .asr import CharToken
 
-from .prepass import FullPrepass
+from .prepass import FullPrepass, pause_ms_after_token
 from .shared import STRONG_STOPS, WEAK_STOPS, is_punct_or_space
 
 
@@ -81,10 +81,6 @@ class RoughBoundary:
     cut_sec: float
     next_token_start_sec: float
     reason: str
-
-
-def _pause_ms(left: CharToken, right: CharToken) -> float:
-    return max(0.0, (float(right.start_sec) - float(left.end_sec)) * 1000.0)
 
 
 def _quality_rank(label: str) -> int:
@@ -217,7 +213,7 @@ def _extract_punctuation_boundaries(
             continue
 
         punct_text = "".join(punctuation_run)
-        pause_ms = _pause_ms(left_char, chars[token_idx + 1])
+        pause_ms = pause_ms_after_token(prepass, token_idx)
         if any(ch in STRONG_STOPS for ch in visible_punct):
             kind = "strong"
             quality, reason = _classify_strong_boundary(pause_ms, prepass)

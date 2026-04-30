@@ -248,6 +248,50 @@ python -m slide_rule \
 - `--dry-run`: 运行流程但不写最终音频片段。
 - `--enable-punctuation-correction`: 启用规则标点修正。
 
+## LLM 辅助切分：slide_LLM
+
+`slide_LLM` 复用 `slide_rule` 的 ASR/alignment 预处理、静音感知细切分、
+输出目录结构、manifest、JSONL 和 trace，但用 LLM 完成标点修正和粗切分决策。
+运行前先在 `.env` 中配置 LLM provider 的 key/base URL，参考 `.env.example`。
+
+```cmd
+python -m slide_LLM \
+  --input mossformer_enhanced \
+  --output-dir sliced_segments_llm \
+  --model-path checkpoints/Qwen3-ASR-1.7B \
+  --aligner-path checkpoints/Qwen3-ForcedAligner-0.6B \
+  --asr-backend transformers \
+  --device cuda:0 \
+  --dtype bfloat16 \
+  --asr-max-batch-size 1 \
+  --llm-concurrency 8 \
+  --min-seg-sec 3 \
+  --max-seg-sec 10 \
+  --vad-backend auto \
+  --llm-model gemini-2.5-flash \
+  --llm-provider gemini \
+  --env-path .env \
+  --overwrite
+```
+
+常用 LLM 参数：
+
+- `--llm-model`: 必填，作为标点和粗切分两个 LLM 阶段的默认模型。
+- `--punct-llm-model`: 可选，只覆盖标点修正阶段。
+- `--rough-llm-model`: 可选，只覆盖粗切分阶段。
+- `--llm-provider`: 可选；省略时 gateway 会尝试从模型名推断 provider。
+- `--env-path`: 可选，指定包含 provider key 的 `.env` 文件。
+- `--llm-max-rounds`: 粗切分长度错误后的最大修复轮数，默认 `5`。
+- `--asr-max-batch-size`: 全局 ASR inference batch 的最大 chunk 数，默认 `1`。当当前音频剩余
+  chunk 少于 batch 容量时，下一条已就绪音频的 chunk 可以补进同一个 ASR batch。
+- `--llm-concurrency`: `slide_LLM` 同时在途的 LLM 调用数上限，默认 `8`。底层
+  LLM gateway 的 provider/model/global 限流仍然会继续生效。
+
+当 `--input` 是目录时，`slide_LLM` 会跨音频并发调度：ASR 使用一个全局 batcher，
+LLM 调用使用独立并发池。每条音频内部仍保持阶段顺序，但 ASR batch 可以由多条音频的
+chunk 共同填满；同时，一条音频可以正在 ASR，其他音频可以等待标点或粗切分 LLM 调用。
+输出目录按源文件 stem 命名，因此不同子目录下同名 stem 会在处理前被拒绝，以避免并发写入碰撞。
+
 ## 最终音量归一化（可选）
 
 `slide_rule` 生成短训练片段后，可以按片段测量响度，把安全片段归一化到固定 LUFS
