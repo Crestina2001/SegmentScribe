@@ -27,9 +27,9 @@ It is cached under `checkpoints/spkrec-ecapa-voxceleb` by default.
 
 ```cmd
 python speaker_outlier_filter/filter_speaker_outliers.py ^
-  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl ^
-  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl ^
-  --dataset-root audios/zhouquanquan_final_normalized ^
+  --input-jsonl audios/my_dataset_normalized/manifest.jsonl ^
+  --output-jsonl audios/my_dataset_normalized/manifest_speaker_filtered.jsonl ^
+  --dataset-root audios/my_dataset_normalized ^
   --device cuda:0 ^
   --overwrite
 ```
@@ -38,8 +38,8 @@ For CPU:
 
 ```cmd
 python speaker_outlier_filter/filter_speaker_outliers.py ^
-  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl ^
-  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl ^
+  --input-jsonl audios/my_dataset_normalized/manifest.jsonl ^
+  --output-jsonl audios/my_dataset_normalized/manifest_speaker_filtered.jsonl ^
   --device cpu
 ```
 
@@ -47,8 +47,8 @@ Inspect scores without writing filtered/pruned JSONL files:
 
 ```cmd
 python speaker_outlier_filter/filter_speaker_outliers.py ^
-  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl ^
-  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl ^
+  --input-jsonl audios/my_dataset_normalized/manifest.jsonl ^
+  --output-jsonl audios/my_dataset_normalized/manifest_speaker_filtered.jsonl ^
   --dry-run ^
   --overwrite
 ```
@@ -57,7 +57,7 @@ python speaker_outlier_filter/filter_speaker_outliers.py ^
 
 Files are written next to `--output-jsonl`:
 
-- `zhouquanquan_speaker_filtered.jsonl`: kept rows, preserving every original
+- `manifest_speaker_filtered.jsonl`: kept rows, preserving every original
   field and row order.
 - `speaker_similarity_report.csv`: one row per input item, with cosine
   similarity, threshold, rank, and prune decision.

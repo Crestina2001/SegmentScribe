@@ -318,15 +318,15 @@ python utils/normalize_corpus_volume.py \
 
 ```cmd
 python speaker_outlier_filter/filter_speaker_outliers.py \
-  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl \
-  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl \
-  --dataset-root audios/zhouquanquan_final_normalized \
+  --input-jsonl audios/my_dataset_normalized/manifest.jsonl \
+  --output-jsonl audios/my_dataset_normalized/manifest_speaker_filtered.jsonl \
+  --dataset-root audios/my_dataset_normalized \
   --device cuda:0 \
   --overwrite
 ```
 
 工具会保留原始音频文件，只写新的 JSONL 和审计报告。过滤结果写入
-`zhouquanquan_speaker_filtered.jsonl`，被剪掉的行写入
+`manifest_speaker_filtered.jsonl`，被剪掉的行写入
 `pruned_speaker_outliers.jsonl`，相似度明细和摘要分别写入
 `speaker_similarity_report.csv` 与 `speaker_filter_summary.json`。
 

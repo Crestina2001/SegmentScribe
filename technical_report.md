@@ -188,7 +188,7 @@ Kept segments become `SegmentRecord` entries. Those records drive `manifest.tsv`
 
 ## Output Layout
 
-For an output directory such as `audios/zhouquanquan_final_4`, the writer creates this layout:
+For an output directory such as `audios/my_dataset_final`, the writer creates this layout:
 
 | Path | Contents |
 | --- | --- |
@@ -251,4 +251,3 @@ To investigate further:
 - Thin cut uses amplitude-based silence trimming, so background noise or music can reduce trimming accuracy.
 - Some trace text or punctuation may appear mojibake-like depending on upstream model output or encoding interpretation. The slicer records that data as produced; the report does not attempt to normalize or correct it.
 - Field names such as `zoom_*` are compatibility names from earlier workflows. In `slide_rule`, thin cutting is implemented by local `librosa` trimming.
-

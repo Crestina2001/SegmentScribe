@@ -358,15 +358,15 @@ embeddings to conservatively filter a VoxCPM JSONL manifest:
 
 ```cmd
 python speaker_outlier_filter/filter_speaker_outliers.py \
-  --input-jsonl audios/zhouquanquan_final_normalized/zhouquanquan.jsonl \
-  --output-jsonl audios/zhouquanquan_final_normalized/zhouquanquan_speaker_filtered.jsonl \
-  --dataset-root audios/zhouquanquan_final_normalized \
+  --input-jsonl audios/my_dataset_normalized/manifest.jsonl \
+  --output-jsonl audios/my_dataset_normalized/manifest_speaker_filtered.jsonl \
+  --dataset-root audios/my_dataset_normalized \
   --device cuda:0 \
   --overwrite
 ```
 
 The tool keeps original audio files untouched and writes only new manifests and
 audit reports. Kept rows are written to
-`zhouquanquan_speaker_filtered.jsonl`, pruned rows are written to
+`manifest_speaker_filtered.jsonl`, pruned rows are written to
 `pruned_speaker_outliers.jsonl`, and the similarity report plus summary are
 written to `speaker_similarity_report.csv` and `speaker_filter_summary.json`.

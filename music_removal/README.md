@@ -20,8 +20,8 @@ Extract vocal stems:
 
 ```cmd
 python music_removal/extract_vocals_demucs.py ^
-  --input audios\zhouquanquan_numbered ^
-  --output audios\zhouquanquan_vocals ^
+  --input audios\my_dataset_numbered ^
+  --output audios\my_dataset_vocals ^
   --device cuda ^
   --model htdemucs ^
   --overwrite
