@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -21,6 +22,7 @@ import numpy as np
 
 ASR_SAMPLE_RATE = 16000
 DTYPE_NAMES = {"float16", "bfloat16", "float32"}
+logger = logging.getLogger(__name__)
 
 
 def resolve_model_path(path: str, *, label: str = "model") -> str:
@@ -130,7 +132,7 @@ class AsrBackend:
 
         if dtype not in DTYPE_NAMES:
             raise ValueError(f"Unsupported dtype: {dtype}")
-        Qwen3ASRModel, torch = _load_qwen_asr_runtime()
+        Qwen3ASRModel, Qwen3ForcedAligner, torch = _load_qwen_asr_runtime()
         torch_dtype = getattr(torch, dtype)
         resolved_model_path = resolve_model_path(model_path, label="ASR model")
         resolved_aligner_path = resolve_model_path(aligner_path, label="forced aligner")
@@ -138,6 +140,10 @@ class AsrBackend:
         forced_aligner_kwargs = _coerce_torch_dtype_kwargs(dict(forced_aligner_kwargs or {}))
         self.backend = backend
         self.max_inference_batch_size = max_inference_batch_size
+        self._forced_aligner_cls = Qwen3ForcedAligner
+        self._forced_aligner_path = resolved_aligner_path
+        self._forced_aligner_kwargs = forced_aligner_kwargs
+        self._forced_aligner = None
 
         if backend == "transformers":
             model_kwargs = {
@@ -149,16 +155,14 @@ class AsrBackend:
             }
             self.model = Qwen3ASRModel.from_pretrained(
                 resolved_model_path,
-                forced_aligner=resolved_aligner_path,
-                forced_aligner_kwargs=forced_aligner_kwargs or None,
+                forced_aligner=None,
                 **model_kwargs,
             )
         else:
             _prepare_vllm_cuda_visible_devices(device)
             self.model = Qwen3ASRModel.LLM(
                 model=resolved_model_path,
-                forced_aligner=resolved_aligner_path,
-                forced_aligner_kwargs=forced_aligner_kwargs or None,
+                forced_aligner=None,
                 max_inference_batch_size=max_inference_batch_size,
                 max_new_tokens=max_new_tokens,
                 **backend_kwargs,
@@ -201,12 +205,13 @@ class AsrBackend:
         results = self.model.transcribe(
             audio=prepared,
             language=self.language,
-            return_time_stamps=True,
+            return_time_stamps=False,
         )
+        alignments = self._align_transcripts(prepared, results)
         transcripts: list[WindowTranscript] = []
-        for result, duration_sec in zip(results, durations):
+        for result, alignment, duration_sec in zip(results, alignments, durations):
             chars: list[CharToken] = []
-            time_stamps = getattr(result, "time_stamps", None)
+            time_stamps = alignment
             items = list(time_stamps) if time_stamps is not None else []
             for idx, item in enumerate(items):
                 chars.append(
@@ -227,11 +232,66 @@ class AsrBackend:
             )
         return transcripts
 
+    def _align_transcripts(
+        self,
+        prepared: Sequence[tuple[np.ndarray, int]],
+        results: Sequence[Any],
+    ) -> list[Any | None]:
+        pending_audio: list[tuple[np.ndarray, int]] = []
+        pending_text: list[str] = []
+        pending_language: list[str] = []
+        pending_indices: list[int] = []
+        alignments: list[Any | None] = [None] * len(results)
+
+        for index, ((audio, sample_rate), result) in enumerate(zip(prepared, results)):
+            text = str(getattr(result, "text", "") or "")
+            if not text.strip():
+                continue
+            language = str(getattr(result, "language", "") or self.language or "")
+            pending_audio.append((audio, sample_rate))
+            pending_text.append(text)
+            pending_language.append(language)
+            pending_indices.append(index)
+
+        if not pending_audio:
+            return alignments
+
+        aligner = self._get_forced_aligner()
+        batch_size = max(1, int(self.max_inference_batch_size or 1))
+        for offset in range(0, len(pending_audio), batch_size):
+            audio_batch = pending_audio[offset : offset + batch_size]
+            text_batch = pending_text[offset : offset + batch_size]
+            language_batch = pending_language[offset : offset + batch_size]
+            index_batch = pending_indices[offset : offset + batch_size]
+            logger.info(
+                "Qwen3-ForcedAligner processing transcript(s) %d-%d/%d",
+                offset + 1,
+                offset + len(audio_batch),
+                len(pending_audio),
+            )
+            aligned_batch = aligner.align(
+                audio=audio_batch,
+                text=text_batch,
+                language=language_batch,
+            )
+            for index, alignment in zip(index_batch, aligned_batch):
+                alignments[index] = alignment
+        return alignments
+
+    def _get_forced_aligner(self) -> Any:
+        if self._forced_aligner is None:
+            logger.info("Loading Qwen3 forced aligner: %s", self._forced_aligner_path)
+            self._forced_aligner = self._forced_aligner_cls.from_pretrained(
+                self._forced_aligner_path,
+                **self._forced_aligner_kwargs,
+            )
+        return self._forced_aligner
+
 
 def _coerce_torch_dtype_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     if not kwargs:
         return kwargs
-    _, torch = _load_qwen_asr_runtime()
+    _, _, torch = _load_qwen_asr_runtime()
     for key in ("dtype", "torch_dtype"):
         value = kwargs.get(key)
         if isinstance(value, str) and value in DTYPE_NAMES:
@@ -239,17 +299,17 @@ def _coerce_torch_dtype_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
-def _load_qwen_asr_runtime() -> tuple[Any, Any]:
+def _load_qwen_asr_runtime() -> tuple[Any, Any, Any]:
     try:
         import torch
-        from qwen_asr import Qwen3ASRModel
+        from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
     except ImportError as exc:
         raise SystemExit(
             "slicing_utils.asr requires the Qwen-ASR runtime dependencies. "
             "Install this repository/package with its runtime requirements, "
             "including torch and qwen_asr, before running ASR."
         ) from exc
-    return Qwen3ASRModel, torch
+    return Qwen3ASRModel, Qwen3ForcedAligner, torch
 
 
 def _prepare_vllm_cuda_visible_devices(device: str) -> None:
