@@ -202,6 +202,7 @@ class SlideRulePipeline:
                 chunk_sec=cfg.preprocess_chunk_sec,
                 vad_cfg=vad_cfg,
                 max_inference_batch_size=cfg.asr_max_batch_size,
+                source_label=str(source_path),
             )
         except Exception as exc:
             result.status = "prepass_error"
