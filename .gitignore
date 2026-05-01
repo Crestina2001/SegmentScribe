@@ -8,4 +8,5 @@ tests/
 loc_dev.md
 **/loc_dev.md
 webui_server*.log
+webui_runs/
 intention/

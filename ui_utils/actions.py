@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import json
+from pathlib import Path
+from typing import Iterator
 
 import gradio as gr
 
@@ -18,39 +21,46 @@ from .commands import (
     volume_normalize_command,
 )
 from .paths import resolve_path
-from .runner import run_command
+from .runner import run_command_stream
 
 
-def run_convert(*args) -> str:
-    return run_command(conversion_command(*args))
+LOG_SEPARATOR = "\n\n" + "-" * 80 + "\n\n"
 
 
-def run_music(*args) -> str:
-    return run_command(music_command(*args))
+def _stream_single_command(command: list[str]) -> Iterator[str]:
+    yield from run_command_stream(command)
 
 
-def run_denoise(*args) -> str:
-    return run_command(denoise_command(*args))
+def run_convert(*args) -> Iterator[str]:
+    return _stream_single_command(conversion_command(*args))
 
 
-def run_long_split(*args) -> str:
-    return run_command(long_split_command(*args))
+def run_music(*args) -> Iterator[str]:
+    return _stream_single_command(music_command(*args))
 
 
-def run_slice(*args) -> str:
-    return run_command(slice_command(*args))
+def run_denoise(*args) -> Iterator[str]:
+    return _stream_single_command(denoise_command(*args))
 
 
-def run_speaker_filter(*args) -> str:
-    return run_command(speaker_filter_command(*args))
+def run_long_split(*args) -> Iterator[str]:
+    return _stream_single_command(long_split_command(*args))
 
 
-def run_volume_normalize(*args) -> str:
-    return run_command(volume_normalize_command(*args))
+def run_slice(*args) -> Iterator[str]:
+    return _stream_single_command(slice_command(*args))
 
 
-def run_model_download(*args) -> str:
-    return run_command(model_download_command(*args))
+def run_speaker_filter(*args) -> Iterator[str]:
+    return _stream_single_command(speaker_filter_command(*args))
+
+
+def run_volume_normalize(*args) -> Iterator[str]:
+    return _stream_single_command(volume_normalize_command(*args))
+
+
+def run_model_download(*args) -> Iterator[str]:
+    return _stream_single_command(model_download_command(*args))
 
 
 def build_full_pipeline_commands(
@@ -213,13 +223,117 @@ def build_full_pipeline_commands(
     return str(work_dir), commands
 
 
-def run_full_pipeline(*args) -> str:
-    work_dir, commands = build_full_pipeline_commands(*args)
+def _find_single_voxcpm_jsonl(dataset_dir: Path) -> Path:
+    matches = sorted(dataset_dir.glob("*_voxcpm.jsonl"))
+    if not matches:
+        raise gr.Error(f"No *_voxcpm.jsonl file found in {dataset_dir}")
+    if len(matches) > 1:
+        choices = "\n".join(f"  - {path.name}" for path in matches)
+        raise gr.Error(f"Multiple *_voxcpm.jsonl files found. Use single-stage tools or keep one JSONL.\n{choices}")
+    return matches[0]
+
+
+def _stream_pipeline_command(command: list[str], completed_logs: list[str]) -> Iterator[str]:
+    latest = ""
+    for latest in run_command_stream(command):
+        yield LOG_SEPARATOR.join([*completed_logs, latest])
+    completed_logs.append(latest)
+
+
+def run_full_pipeline(
+    *args,
+    do_speaker_filter: bool = False,
+    speaker_device: str = "cuda:0",
+    speaker_mad_multiplier: float = 3.0,
+    speaker_max_prune_ratio: float = 0.10,
+    speaker_min_rows: int = 8,
+    do_volume_normalize: bool = False,
+    volume_target_lufs: float = -20.0,
+    volume_max_volume_change_db: float = 12.0,
+    volume_max_dynamic_range_db: float = 24.0,
+    volume_peak_margin_db: float = 1.0,
+    volume_min_active_ratio: float = 0.03,
+    volume_sample_rate: int = 0,
+) -> Iterator[str]:
+    command_arg_count = len(inspect.signature(build_full_pipeline_commands).parameters)
+    command_args = args[:command_arg_count]
+    post_args = args[command_arg_count:]
+    post_defaults = (
+        do_speaker_filter,
+        speaker_device,
+        speaker_mad_multiplier,
+        speaker_max_prune_ratio,
+        speaker_min_rows,
+        do_volume_normalize,
+        volume_target_lufs,
+        volume_max_volume_change_db,
+        volume_max_dynamic_range_db,
+        volume_peak_margin_db,
+        volume_min_active_ratio,
+        volume_sample_rate,
+    )
+    (
+        do_speaker_filter,
+        speaker_device,
+        speaker_mad_multiplier,
+        speaker_max_prune_ratio,
+        speaker_min_rows,
+        do_volume_normalize,
+        volume_target_lufs,
+        volume_max_volume_change_db,
+        volume_max_dynamic_range_db,
+        volume_peak_margin_db,
+        volume_min_active_ratio,
+        volume_sample_rate,
+    ) = (*post_args, *post_defaults[len(post_args) :])
+
+    work_dir, commands = build_full_pipeline_commands(*command_args)
     resolve_path(work_dir).mkdir(parents=True, exist_ok=True)
     logs: list[str] = [f"Workspace: {work_dir}"]
+    yield LOG_SEPARATOR.join(logs)
     for command in commands:
-        logs.append(run_command(command))
-    return "\n\n" + ("-" * 80 + "\n\n").join(logs)
+        yield from _stream_pipeline_command(command, logs)
+
+    sliced_dir = resolve_path(work_dir) / "04_sliced"
+    active_jsonl: Path | None = None
+    active_dataset_root: Path | None = None
+
+    if do_speaker_filter:
+        active_jsonl = _find_single_voxcpm_jsonl(sliced_dir)
+        active_dataset_root = sliced_dir
+        filtered_jsonl = sliced_dir / f"{active_jsonl.stem}_speaker_filtered.jsonl"
+        command = speaker_filter_command(
+            str(active_jsonl),
+            str(filtered_jsonl),
+            str(active_dataset_root),
+            speaker_device,
+            speaker_mad_multiplier,
+            speaker_max_prune_ratio,
+            speaker_min_rows,
+            False,
+            True,
+        )
+        yield from _stream_pipeline_command(command, logs)
+        active_jsonl = filtered_jsonl
+
+    if do_volume_normalize:
+        active_dataset_root = active_dataset_root or sliced_dir
+        active_jsonl = active_jsonl or _find_single_voxcpm_jsonl(sliced_dir)
+        normalized_dir = resolve_path(work_dir) / "05_normalized"
+        command = volume_normalize_command(
+            str(active_dataset_root),
+            str(normalized_dir),
+            str(active_jsonl),
+            volume_target_lufs,
+            volume_max_volume_change_db,
+            volume_max_dynamic_range_db,
+            volume_peak_margin_db,
+            volume_min_active_ratio,
+            volume_sample_rate,
+            False,
+            True,
+        )
+        yield from _stream_pipeline_command(command, logs)
 
 
 def read_summary(output_path: str) -> str:

@@ -112,6 +112,8 @@ def _build_full_pipeline_tab() -> None:
             do_denoise = gr.Checkbox(label="3. Eliminate noise", value=True)
             do_presplit = gr.Checkbox(label="4. Pre-split long audio", value=False)
             do_slice = gr.Checkbox(label="5. Slice audios", value=True)
+            do_speaker_filter = gr.Checkbox(label="7. Filter speaker outliers", value=False)
+            do_volume_normalize = gr.Checkbox(label="8. Normalize volume", value=False)
 
         with gr.Accordion("Conversion settings", open=False):
             sample_rate = gr.Number(label="Sample rate", value=16000, precision=0)
@@ -151,6 +153,23 @@ def _build_full_pipeline_tab() -> None:
 
         with gr.Accordion("Slicing settings", open=False):
             slice_controls = _shared_slice_controls("full", include_device=False, include_run_flags=False)
+
+        with gr.Accordion("Speaker filter settings", open=False):
+            with gr.Row():
+                speaker_device = gr.Textbox(label="Speaker filter device", value="cuda:0")
+                speaker_mad = gr.Number(label="MAD multiplier", value=3.0)
+                speaker_max_prune = gr.Number(label="Max prune ratio", value=0.10)
+                speaker_min_rows = gr.Number(label="Min rows", value=8, precision=0)
+
+        with gr.Accordion("Volume normalization settings", open=False):
+            with gr.Row():
+                volume_target = gr.Number(label="Target LUFS", value=-20.0)
+                volume_max_gain = gr.Number(label="Max upward gain dB", value=12.0)
+                volume_dynamic = gr.Number(label="Max dynamic range dB", value=24.0)
+            with gr.Row():
+                volume_peak_margin = gr.Number(label="Peak margin dB", value=1.0)
+                volume_active_ratio = gr.Number(label="Min active ratio", value=0.03)
+                volume_sample_rate = gr.Number(label="Output sample rate (0 keeps source)", value=0, precision=0)
 
         browse_full_source.click(browse_folder, inputs=source_path, outputs=source_path)
         browse_full_workspace.click(browse_folder, inputs=workspace, outputs=workspace)
@@ -207,6 +226,18 @@ def _build_full_pipeline_tab() -> None:
                 slice_controls["full_env_path"],
                 slice_controls["full_llm_concurrency"],
                 slice_controls["full_llm_max_rounds"],
+                do_speaker_filter,
+                speaker_device,
+                speaker_mad,
+                speaker_max_prune,
+                speaker_min_rows,
+                do_volume_normalize,
+                volume_target,
+                volume_max_gain,
+                volume_dynamic,
+                volume_peak_margin,
+                volume_active_ratio,
+                volume_sample_rate,
             ],
             outputs=pipeline_log,
         )
