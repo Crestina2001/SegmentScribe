@@ -43,6 +43,28 @@ WebUI 可以运行下文介绍的主要流程：
 - 从 VoxCPM JSONL 中过滤疑似错误说话人的片段；
 - 将最终片段音量归一化到新的安全数据集目录。
 
+## 使用 Bash 运行完整流水线
+
+无需打开 WebUI，也可以直接编辑配置文件并启动完整流水线：
+
+```bash
+bash scripts/run_full_pipeline.sh configs/full_pipeline.env
+```
+
+配置文件是 bash env 文件，用来控制源音频目录、工作目录、启用的阶段、
+模型路径、切分模式、可选的说话人过滤和可选的音量归一化。各阶段输出会写到
+工作目录下：
+
+- `01_numbered_wavs`
+- `02_vocals`
+- `03_denoised`
+- `03_presliced`
+- `04_sliced`
+- `05_normalized`
+
+使用 `SLICE_MODE="rule"` 运行 `slide_rule`；使用 `SLICE_MODE="llm"` 时，
+需要同时配置 `LLM_MODEL` 和对应 provider 设置，以运行 `slide_LLM`。
+
 下载 WebUI 默认使用的模型 checkpoint：
 
 ```cmd
@@ -51,6 +73,15 @@ python utils/download_models.py --models all --download_path checkpoints
 
 该命令会在 `checkpoints/` 下准备 MossFormer2、Qwen3-ASR 和 Qwen3 forced aligner
 的默认路径。WebUI 的 **Models** 标签页中也提供同样的下载入口。
+`--download_path` 是本地 checkpoint 目标目录；使用 `--provider modelscope`
+或 `--provider hf` 为所有选中的模型选择下载来源。
+
+示例：
+
+```cmd
+python utils/download_models.py --models all --provider modelscope --download_path checkpoints
+python utils/download_models.py --models all --provider hf --download_path checkpoints
+```
 
 安装 `ffmpeg`，用于音频格式转换和处理非 WAV 输入：
 

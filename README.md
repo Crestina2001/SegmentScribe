@@ -80,6 +80,13 @@ available from the WebUI's **Models** tab. `--download_path` is the local
 checkpoint destination. Use `--provider modelscope` or `--provider hf` to pick
 the download source for all selected models.
 
+Examples:
+
+```cmd
+python utils/download_models.py --models all --provider modelscope --download_path checkpoints
+python utils/download_models.py --models all --provider hf --download_path checkpoints
+```
+
 Install `ffmpeg` for audio conversion and non-WAV inputs:
 
 ```cmd
