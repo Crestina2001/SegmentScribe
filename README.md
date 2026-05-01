@@ -45,6 +45,29 @@ The WebUI can run the same pipeline stages described below:
 - filter wrong-speaker outliers from VoxCPM JSONL manifests;
 - normalize final segment loudness into a new safe dataset folder.
 
+## Full Pipeline From Bash
+
+You can run the whole pipeline without the WebUI by editing the config and
+launching the runner:
+
+```bash
+bash scripts/run_full_pipeline.sh configs/full_pipeline.env
+```
+
+The config is a bash env file. It controls the source folder, workspace,
+enabled stages, model paths, slicing mode, optional speaker filtering, and
+optional volume normalization. Stage outputs are written under the workspace:
+
+- `01_numbered_wavs`
+- `02_vocals`
+- `03_denoised`
+- `03_presliced`
+- `04_sliced`
+- `05_normalized`
+
+Use `SLICE_MODE="rule"` for `slide_rule`, or `SLICE_MODE="llm"` with
+`LLM_MODEL` and provider settings for `slide_LLM`.
+
 Download the WebUI's default model checkpoints:
 
 ```cmd

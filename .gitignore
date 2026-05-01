@@ -9,4 +9,5 @@ loc_dev.md
 **/loc_dev.md
 webui_server*.log
 webui_runs/
+pipeline_runs/
 intention/
