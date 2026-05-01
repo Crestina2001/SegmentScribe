@@ -308,19 +308,24 @@ class AsrBackend:
 
         aligner = self._get_forced_aligner()
         batch_size = max(1, int(self.max_aligner_batch_size or 1))
+        jobs = sorted(
+            zip(pending_indices, pending_audio, pending_text, pending_language),
+            key=lambda item: len(item[1][0]),
+        )
         progress = tqdm(
-            total=len(pending_audio),
+            total=len(jobs),
             desc="Qwen3-ForcedAligner",
             unit="win",
             dynamic_ncols=True,
             leave=False,
         )
         try:
-            for offset in range(0, len(pending_audio), batch_size):
-                audio_batch = pending_audio[offset : offset + batch_size]
-                text_batch = pending_text[offset : offset + batch_size]
-                language_batch = pending_language[offset : offset + batch_size]
-                index_batch = pending_indices[offset : offset + batch_size]
+            for offset in range(0, len(jobs), batch_size):
+                job_batch = jobs[offset : offset + batch_size]
+                index_batch = [item[0] for item in job_batch]
+                audio_batch = [item[1] for item in job_batch]
+                text_batch = [item[2] for item in job_batch]
+                language_batch = [item[3] for item in job_batch]
                 aligned_batch = aligner.align(
                     audio=audio_batch,
                     text=text_batch,

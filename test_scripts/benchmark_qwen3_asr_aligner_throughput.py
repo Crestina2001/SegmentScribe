@@ -217,9 +217,8 @@ def run_child(args: argparse.Namespace) -> int:
         if not audio_chunks:
             raise ValueError(f"No audio chunks found under {args.input}")
 
-        load_started = time.perf_counter()
-        model, aligner, torch = load_models(args, candidate)
-        load_sec = time.perf_counter() - load_started
+        model, aligner, torch, load_breakdown = load_models(args, candidate)
+        load_sec = load_breakdown["total_sec"]
 
         warmup_sec = 0.0
         if args.warmup_batches > 0:
@@ -239,11 +238,17 @@ def run_child(args: argparse.Namespace) -> int:
         asr_sec = time.perf_counter() - asr_started
 
         align_started = time.perf_counter()
+        align_prepare_sec = 0.0
+        align_call_sec = 0.0
+        align_sync_sec = 0.0
+        align_result_sec = 0.0
+        align_batch_count = 0
         aligned_count = 0
         for chunk_batch, result_batch in zip(
             batched(audio_chunks, candidate.batch_size),
             batched(asr_results, candidate.batch_size),
         ):
+            prepare_started = time.perf_counter()
             texts = [str(getattr(result, "text", "") or "") for result in result_batch]
             languages = [
                 str(getattr(result, "language", "") or args.language or "")
@@ -254,16 +259,34 @@ def run_child(args: argparse.Namespace) -> int:
                 for chunk, text, language in zip(chunk_batch, texts, languages)
                 if text.strip()
             ]
+            align_prepare_sec += time.perf_counter() - prepare_started
             if not non_empty:
                 continue
-            aligner.align(
+
+            call_started = time.perf_counter()
+            aligned_batch = aligner.align(
                 audio=[item[0] for item in non_empty],
                 text=[item[1] for item in non_empty],
                 language=[item[2] for item in non_empty],
             )
+            align_call_sec += time.perf_counter() - call_started
+
+            sync_started = time.perf_counter()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            align_sync_sec += time.perf_counter() - sync_started
+
+            result_started = time.perf_counter()
+            # Materialize the iterable to include timestamp-object construction
+            # in the measured postprocess bucket when the aligner returns lazy data.
+            _ = list(aligned_batch) if aligned_batch is not None else []
             aligned_count += len(non_empty)
+            align_batch_count += 1
+            align_result_sec += time.perf_counter() - result_started
+        final_sync_started = time.perf_counter()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        align_sync_sec += time.perf_counter() - final_sync_started
         align_sec = time.perf_counter() - align_started
 
         audio_sec = sum(len(audio) / ASR_SAMPLE_RATE for audio, _sr in audio_chunks)
@@ -275,9 +298,20 @@ def run_child(args: argparse.Namespace) -> int:
             "aligned_count": aligned_count,
             "audio_sec": round(audio_sec, 3),
             "load_sec": round(load_sec, 3),
+            "asr_load_sec": round(load_breakdown["asr_sec"], 3),
+            "aligner_load_sec": round(load_breakdown["aligner_sec"], 3),
             "warmup_sec": round(warmup_sec, 3),
             "asr_sec": round(asr_sec, 3),
             "align_sec": round(align_sec, 3),
+            "align_batch_count": align_batch_count,
+            "align_prepare_sec": round(align_prepare_sec, 3),
+            "align_call_sec": round(align_call_sec, 3),
+            "align_sync_sec": round(align_sync_sec, 3),
+            "align_result_sec": round(align_result_sec, 3),
+            "align_unaccounted_sec": round(
+                max(0.0, align_sec - align_prepare_sec - align_call_sec - align_sync_sec - align_result_sec),
+                3,
+            ),
             "inference_sec": round(inference_sec, 3),
             "end_to_end_sec": round(time.perf_counter() - started, 3),
             "asr_audio_hours_per_hour": round(audio_sec / max(asr_sec, 1e-9), 3),
@@ -299,7 +333,7 @@ def run_child(args: argparse.Namespace) -> int:
         return 2
 
 
-def load_models(args: argparse.Namespace, candidate: Candidate) -> tuple[Any, Any, Any]:
+def load_models(args: argparse.Namespace, candidate: Candidate) -> tuple[Any, Any, Any, dict[str, float]]:
     import torch
     from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
 
@@ -309,6 +343,8 @@ def load_models(args: argparse.Namespace, candidate: Candidate) -> tuple[Any, An
     aligner_path = resolve_model_path(args.aligner_path, label="forced aligner")
     torch_dtype = getattr(torch, args.dtype)
     backend_kwargs = dict(candidate.backend_kwargs)
+    total_started = time.perf_counter()
+    asr_started = time.perf_counter()
     if candidate.backend == "vllm":
         model = Qwen3ASRModel.LLM(
             model=model_path,
@@ -327,8 +363,15 @@ def load_models(args: argparse.Namespace, candidate: Candidate) -> tuple[Any, An
             max_new_tokens=args.max_new_tokens,
             **backend_kwargs,
         )
+    asr_load_sec = time.perf_counter() - asr_started
+    aligner_started = time.perf_counter()
     aligner = Qwen3ForcedAligner.from_pretrained(aligner_path)
-    return model, aligner, torch
+    aligner_load_sec = time.perf_counter() - aligner_started
+    return model, aligner, torch, {
+        "asr_sec": asr_load_sec,
+        "aligner_sec": aligner_load_sec,
+        "total_sec": time.perf_counter() - total_started,
+    }
 
 
 def run_asr(model: Any, windows: Sequence[tuple[np.ndarray, int]], language: str | None) -> list[Any]:
@@ -500,9 +543,17 @@ def write_csv(path: Path, results: Sequence[dict[str, Any]]) -> None:
         "chunk_count",
         "audio_sec",
         "load_sec",
+        "asr_load_sec",
+        "aligner_load_sec",
         "warmup_sec",
         "asr_sec",
         "align_sec",
+        "align_batch_count",
+        "align_prepare_sec",
+        "align_call_sec",
+        "align_sync_sec",
+        "align_result_sec",
+        "align_unaccounted_sec",
         "inference_sec",
         "inference_audio_hours_per_hour",
         "error_type",
@@ -523,9 +574,17 @@ def write_csv(path: Path, results: Sequence[dict[str, Any]]) -> None:
                 "chunk_count": result.get("chunk_count"),
                 "audio_sec": result.get("audio_sec"),
                 "load_sec": result.get("load_sec"),
+                "asr_load_sec": result.get("asr_load_sec"),
+                "aligner_load_sec": result.get("aligner_load_sec"),
                 "warmup_sec": result.get("warmup_sec"),
                 "asr_sec": result.get("asr_sec"),
                 "align_sec": result.get("align_sec"),
+                "align_batch_count": result.get("align_batch_count"),
+                "align_prepare_sec": result.get("align_prepare_sec"),
+                "align_call_sec": result.get("align_call_sec"),
+                "align_sync_sec": result.get("align_sync_sec"),
+                "align_result_sec": result.get("align_result_sec"),
+                "align_unaccounted_sec": result.get("align_unaccounted_sec"),
                 "inference_sec": result.get("inference_sec"),
                 "inference_audio_hours_per_hour": result.get("inference_audio_hours_per_hour"),
                 "error_type": result.get("error_type"),
@@ -547,6 +606,7 @@ def format_result(result: dict[str, Any]) -> str:
         f"OK {candidate.get('name')} "
         f"throughput={result['inference_audio_hours_per_hour']}x realtime "
         f"asr={result['asr_sec']}s align={result['align_sec']}s "
+        f"align_call={result.get('align_call_sec')}s "
         f"chunks={result['chunk_count']}"
     )
 
