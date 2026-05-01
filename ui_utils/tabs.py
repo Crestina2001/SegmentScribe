@@ -457,8 +457,8 @@ def _build_models_tab() -> None:
     with gr.Tab("Models"):
         gr.Markdown("Download checkpoints into the default folders used by the WebUI.")
         download_models = gr.CheckboxGroup(["all", "qwen3", "asr", "aligner", "mossformer"], value=["all"], label="Models")
-        download_provider = gr.Dropdown(["modelscope", "huggingface"], value="modelscope", label="Qwen3 download provider")
-        download_path = gr.Textbox(label="Download path", value=str(PROJECT_ROOT / "checkpoints"))
+        download_provider = gr.Dropdown(["modelscope", "huggingface"], value="modelscope", label="Download source")
+        download_path = gr.Textbox(label="Checkpoint root path", value=str(PROJECT_ROOT / "checkpoints"))
         download_asr_dir = gr.Textbox(label="ASR directory name", value="Qwen3-ASR-1.7B")
         download_aligner_dir = gr.Textbox(label="Aligner directory name", value="Qwen3-ForcedAligner-0.6B")
         download_mossformer_path = gr.Textbox(label="MossFormer checkpoint path", value=str(PROJECT_ROOT / "checkpoints" / "MossFormer2_SE_48K"))

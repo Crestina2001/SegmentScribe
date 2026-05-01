@@ -14,17 +14,22 @@ unless --force is passed.
 from __future__ import annotations
 
 import argparse
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 
-QWEN_MODELS = {
-    "asr": "Qwen/Qwen3-ASR-1.7B",
-    "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
+MODEL_REPOS = {
+    "huggingface": {
+        "asr": "Qwen/Qwen3-ASR-1.7B",
+        "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
+        "mossformer": "alibabasglab/MossFormer2_SE_48K",
+    },
+    "modelscope": {
+        "asr": "Qwen/Qwen3-ASR-1.7B",
+        "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
+        "mossformer": "alibabasglab/MossFormer2_SE_48K",
+    },
 }
-MOSSFORMER_REPO = "alibabasglab/MossFormer2_SE_48K"
 DEFAULT_DOWNLOAD_PATH = Path("checkpoints")
 DEFAULT_MOSSFORMER_DIR = Path("MossFormer2_SE_48K")
 
@@ -44,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         "--provider",
         choices=("modelscope", "huggingface", "hf"),
         default="modelscope",
-        help="Provider for Qwen3 ASR/aligner downloads. Default: modelscope.",
+        help="Download source for all selected models. Default: modelscope.",
     )
     parser.add_argument(
         "--download-path",
@@ -77,6 +82,21 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="MossFormer checkpoint folder. Default: <download-path>/MossFormer2_SE_48K.",
+    )
+    parser.add_argument(
+        "--asr-model-id",
+        default=None,
+        help="Override the provider model id for Qwen3 ASR.",
+    )
+    parser.add_argument(
+        "--aligner-model-id",
+        default=None,
+        help="Override the provider model id for the Qwen3 forced aligner.",
+    )
+    parser.add_argument(
+        "--mossformer-model-id",
+        default=None,
+        help="Override the provider model id for MossFormer2.",
     )
     parser.add_argument(
         "--force",
@@ -131,16 +151,14 @@ def skip_existing(destination: Path, force: bool, marker: Path | None = None) ->
 
 
 def download_with_modelscope(model_id: str, destination: Path) -> None:
-    modelscope = shutil.which("modelscope")
-    if not modelscope:
+    try:
+        from modelscope import snapshot_download
+    except ModuleNotFoundError as exc:
         raise SystemExit(
-            "Missing ModelScope CLI. Install dependencies with: "
+            "Missing Python dependency: modelscope\n"
             f"{sys.executable} -m pip install -r requirements.txt"
-        )
-    subprocess.run(
-        [modelscope, "download", "--model", model_id, "--local_dir", str(destination)],
-        check=True,
-    )
+        ) from exc
+    snapshot_download(model_id=model_id, local_dir=str(destination))
 
 
 def download_with_hf(model_id: str, destination: Path) -> None:
@@ -154,12 +172,19 @@ def download_with_hf(model_id: str, destination: Path) -> None:
     snapshot_download(repo_id=model_id, local_dir=str(destination))
 
 
-def download_qwen(target: str, provider: str, destination: Path, force: bool) -> None:
-    if skip_existing(destination, force):
+def download_model(
+    model_id: str,
+    provider: str,
+    destination: Path,
+    force: bool,
+    *,
+    marker: Path | None = None,
+) -> None:
+    if skip_existing(destination, force, marker=marker):
         return
     destination.mkdir(parents=True, exist_ok=True)
-    model_id = QWEN_MODELS[target]
     print(f"Downloading {model_id}")
+    print(f"Provider: {provider}")
     print(f"Destination: {destination}")
     if provider == "modelscope":
         download_with_modelscope(model_id, destination)
@@ -167,14 +192,15 @@ def download_qwen(target: str, provider: str, destination: Path, force: bool) ->
         download_with_hf(model_id, destination)
 
 
-def download_mossformer(destination: Path, force: bool) -> None:
-    marker = destination / "last_best_checkpoint"
-    if skip_existing(destination, force, marker=marker):
-        return
-    destination.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading {MOSSFORMER_REPO}")
-    print(f"Destination: {destination}")
-    download_with_hf(MOSSFORMER_REPO, destination)
+def model_id_for(args: argparse.Namespace, provider: str, target: str) -> str:
+    overrides = {
+        "asr": args.asr_model_id,
+        "aligner": args.aligner_model_id,
+        "mossformer": args.mossformer_model_id,
+    }
+    if overrides[target]:
+        return overrides[target]
+    return MODEL_REPOS[provider][target]
 
 
 def print_webui_paths(asr_dir: Path, aligner_dir: Path, mossformer_dir: Path) -> None:
@@ -196,11 +222,17 @@ def main() -> None:
 
     targets = selected_models(args.models)
     if "asr" in targets:
-        download_qwen("asr", provider, asr_dir, args.force)
+        download_model(model_id_for(args, provider, "asr"), provider, asr_dir, args.force)
     if "aligner" in targets:
-        download_qwen("aligner", provider, aligner_dir, args.force)
+        download_model(model_id_for(args, provider, "aligner"), provider, aligner_dir, args.force)
     if "mossformer" in targets:
-        download_mossformer(mossformer_dir, args.force)
+        download_model(
+            model_id_for(args, provider, "mossformer"),
+            provider,
+            mossformer_dir,
+            args.force,
+            marker=mossformer_dir / "last_best_checkpoint",
+        )
 
     print_webui_paths(asr_dir, aligner_dir, mossformer_dir)
     print(f"\nDownload path: {download_path.resolve()}")
