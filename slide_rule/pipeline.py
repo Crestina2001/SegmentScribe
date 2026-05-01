@@ -27,7 +27,7 @@ from slicing_utils.filter_write import (
     write_text_atomic,
     write_voxcpm_jsonl,
 )
-from slicing_utils.prepass import FullPrepass, VadConfig, compute_full_prepass
+from slicing_utils.prepass import FullPrepass, RmsSilenceConfig, VadConfig, compute_full_prepass
 from slicing_utils.rough_cut import Phase3Result, run_rough_cut_phase
 
 from .config import AUDIO_EXTENSIONS, RuleWorkflowConfig
@@ -92,6 +92,7 @@ class SlideRulePipeline:
             device=config.device,
             dtype=config.dtype,
             max_inference_batch_size=config.asr_max_batch_size,
+            max_aligner_batch_size=config.aligner_max_batch_size,
             language=config.language,
             backend_kwargs=config.asr_backend_kwargs,
             forced_aligner_kwargs=config.forced_aligner_kwargs,
@@ -102,13 +103,15 @@ class SlideRulePipeline:
         workflow_started = time.perf_counter()
         logger.info(
             "Starting slide_rule: input=%s output_dir=%s backend=%s device=%s dtype=%s "
-            "batch_size=%s segment_bounds=%.2f-%.2fs dry_run=%s overwrite=%s",
+            "asr_batch=%s aligner_batch=%s chunk_mode=%s segment_bounds=%.2f-%.2fs dry_run=%s overwrite=%s",
             cfg.input_path,
             cfg.output_dir,
             cfg.asr_backend,
             cfg.device,
             cfg.dtype,
             cfg.asr_max_batch_size,
+            cfg.aligner_max_batch_size,
+            cfg.preprocess_chunk_mode,
             cfg.min_seg_sec,
             cfg.max_seg_sec,
             cfg.dry_run,
@@ -191,6 +194,15 @@ class SlideRulePipeline:
             min_silence_ms=cfg.vad_min_silence_ms,
             speech_pad_ms=cfg.vad_speech_pad_ms,
         )
+        rms_silence_cfg = RmsSilenceConfig(
+            min_chunk_sec=cfg.preprocess_min_chunk_sec,
+            max_chunk_sec=cfg.preprocess_max_chunk_sec,
+            frame_ms=cfg.rms_silence_frame_ms,
+            hop_ms=cfg.rms_silence_hop_ms,
+            silence_percentile=cfg.rms_silence_percentile,
+            threshold_multiplier=cfg.rms_silence_threshold_multiplier,
+            min_silence_ms=cfg.rms_min_silence_ms,
+        )
 
         try:
             phase_started = time.perf_counter()
@@ -200,6 +212,8 @@ class SlideRulePipeline:
                 sr,
                 self.asr_backend,
                 chunk_sec=cfg.preprocess_chunk_sec,
+                chunk_mode=cfg.preprocess_chunk_mode,
+                rms_silence_cfg=rms_silence_cfg,
                 vad_cfg=vad_cfg,
                 max_inference_batch_size=cfg.asr_max_batch_size,
                 source_label=str(source_path),
@@ -469,9 +483,13 @@ class SlideRulePipeline:
                 "device": cfg.device,
                 "dtype": cfg.dtype,
                 "asr_max_batch_size": cfg.asr_max_batch_size,
+                "aligner_max_batch_size": cfg.aligner_max_batch_size,
                 "min_seg_sec": cfg.min_seg_sec,
                 "max_seg_sec": cfg.max_seg_sec,
                 "preprocess_chunk_sec": cfg.preprocess_chunk_sec,
+                "preprocess_chunk_mode": cfg.preprocess_chunk_mode,
+                "preprocess_min_chunk_sec": cfg.preprocess_min_chunk_sec,
+                "preprocess_max_chunk_sec": cfg.preprocess_max_chunk_sec,
                 "vad_backend": cfg.vad_backend,
                 "target_sample_rate": cfg.target_sample_rate,
                 "max_source_seconds": cfg.max_source_seconds,

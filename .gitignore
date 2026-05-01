@@ -3,7 +3,8 @@ checkpoints/
 .env
 __pycache__/
 *.pyc
-test_scripts/
+test_scripts/logs/
+test_scripts/__pycache__/
 tests/
 loc_dev.md
 **/loc_dev.md

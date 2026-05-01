@@ -29,6 +29,7 @@ class LLMWorkflowConfig:
     device: str = "cuda:0"
     dtype: str = "bfloat16"
     asr_max_batch_size: int = 1
+    aligner_max_batch_size: int = 1
     min_seg_sec: float = 3.0
     max_seg_sec: float = 10.0
     language: Optional[str] = None
@@ -38,6 +39,14 @@ class LLMWorkflowConfig:
     overwrite: bool = False
     dry_run: bool = False
     preprocess_chunk_sec: float = 30.0
+    preprocess_chunk_mode: str = "rms_silence"
+    preprocess_min_chunk_sec: float = 5.0
+    preprocess_max_chunk_sec: float = 15.0
+    rms_silence_frame_ms: float = 25.0
+    rms_silence_hop_ms: float = 5.0
+    rms_silence_percentile: float = 25.0
+    rms_silence_threshold_multiplier: float = 1.8
+    rms_min_silence_ms: float = 80.0
     vad_backend: str = "auto"
     vad_threshold: float = 0.5
     vad_min_speech_ms: int = 250

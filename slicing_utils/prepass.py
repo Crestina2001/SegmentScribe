@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 
@@ -113,6 +113,18 @@ class FullPrepassPlan:
     chunks: list[tuple[int, int]]
 
 
+@dataclass(frozen=True)
+class RmsSilenceConfig:
+    min_chunk_sec: float = 5.0
+    max_chunk_sec: float = 15.0
+    frame_ms: float = 25.0
+    hop_ms: float = 5.0
+    silence_percentile: float = 25.0
+    threshold_multiplier: float = 1.8
+    min_silence_ms: float = 80.0
+    fallback: str = "max"
+
+
 def compact_pause_stats(prepass: FullPrepass) -> dict[str, dict[str, Any]]:
     """Return a compact dict summary of strong/weak/no_punc pause quantiles."""
     keys = ("p5_ms", "p20_ms", "p40_ms", "p50_ms", "p60_ms", "p80_ms", "p95_ms")
@@ -160,6 +172,144 @@ def _run_vad(
             exc,
         )
         return []
+
+
+def _frame_rms(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    frame_ms: float,
+    hop_ms: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    frame = max(1, int(round(sample_rate * frame_ms / 1000.0)))
+    hop = max(1, int(round(sample_rate * hop_ms / 1000.0)))
+    if audio.size < frame:
+        padded = np.zeros(frame, dtype=np.float32)
+        padded[: audio.size] = audio
+        audio = padded
+
+    offsets = np.arange(0, audio.size - frame + 1, hop, dtype=np.int64)
+    if offsets.size == 0:
+        return np.asarray([], dtype=np.float32), np.asarray([], dtype=np.float32)
+
+    values = np.empty(len(offsets), dtype=np.float32)
+    for i, offset in enumerate(offsets):
+        chunk = audio[offset : offset + frame]
+        values[i] = float(np.sqrt(np.mean(np.square(chunk))))
+    centers = (offsets + frame * 0.5) / float(sample_rate)
+    return values, centers.astype(np.float32)
+
+
+def _true_runs(mask: np.ndarray) -> Iterable[tuple[int, int]]:
+    start: int | None = None
+    for i, value in enumerate(mask):
+        if bool(value) and start is None:
+            start = i
+        elif not bool(value) and start is not None:
+            yield start, i - 1
+            start = None
+    if start is not None:
+        yield start, len(mask) - 1
+
+
+def _choose_rms_silence_cut_sample(
+    *,
+    cursor_sample: int,
+    total_samples: int,
+    sample_rate: int,
+    rms: np.ndarray,
+    centers: np.ndarray,
+    threshold: float,
+    cfg: RmsSilenceConfig,
+) -> int:
+    cursor_sec = cursor_sample / float(sample_rate)
+    min_sec = max(0.0, float(cfg.min_chunk_sec))
+    max_sec = max(min_sec, float(cfg.max_chunk_sec))
+    earliest = cursor_sec + min_sec
+    latest = min(cursor_sec + max_sec, total_samples / float(sample_rate))
+    if latest <= cursor_sec:
+        return total_samples
+
+    in_window = (centers >= earliest) & (centers <= latest)
+    silent = in_window & (rms <= threshold)
+    hop_sec = max(
+        1e-6,
+        float(centers[1] - centers[0]) if len(centers) > 1 else cfg.hop_ms / 1000.0,
+    )
+    min_frames = max(1, int(np.ceil((cfg.min_silence_ms / 1000.0) / hop_sec)))
+
+    best: tuple[float, float, float, int, int] | None = None
+    target_mid = cursor_sec + (min_sec + max_sec) * 0.5
+    for start_i, end_i in _true_runs(silent):
+        if end_i - start_i + 1 < min_frames:
+            continue
+        silence_start = float(centers[start_i])
+        silence_end = float(centers[end_i])
+        silence_len = max(0.0, silence_end - silence_start)
+        mean_rms = float(np.mean(rms[start_i : end_i + 1]))
+        center = (silence_start + silence_end) * 0.5
+        candidate = (silence_len, -mean_rms, -abs(center - target_mid), start_i, end_i)
+        if best is None or candidate > best:
+            best = candidate
+
+    if best is None:
+        cut_sec = latest if cfg.fallback == "max" else cursor_sec + (latest - cursor_sec) * 0.5
+    else:
+        _silence_len, _neg_rms, _target_distance, start_i, end_i = best
+        cut_sec = (float(centers[start_i]) + float(centers[end_i])) * 0.5
+
+    cut_sample = int(round(cut_sec * sample_rate))
+    min_cut = min(total_samples, cursor_sample + int(round(min_sec * sample_rate)))
+    max_cut = min(total_samples, cursor_sample + int(round(max_sec * sample_rate)))
+    return max(min_cut, min(cut_sample, max_cut))
+
+
+def _rms_silence_chunks(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    cfg: RmsSilenceConfig,
+) -> list[tuple[int, int]]:
+    if audio.size == 0 or sample_rate <= 0:
+        return []
+
+    rms, centers = _frame_rms(
+        np.asarray(audio, dtype=np.float32),
+        sample_rate,
+        frame_ms=cfg.frame_ms,
+        hop_ms=cfg.hop_ms,
+    )
+    if rms.size == 0:
+        return [(0, len(audio))]
+
+    floor = float(np.percentile(rms, cfg.silence_percentile))
+    median = float(np.percentile(rms, 50))
+    peak = float(np.max(rms))
+    threshold = max(floor * cfg.threshold_multiplier, median * 0.45, peak * 0.025, 1e-6)
+
+    chunks: list[tuple[int, int]] = []
+    cursor = 0
+    min_samples = max(1, int(round(cfg.min_chunk_sec * sample_rate)))
+    max_samples = max(min_samples, int(round(cfg.max_chunk_sec * sample_rate)))
+    while cursor < len(audio):
+        remaining = len(audio) - cursor
+        if remaining <= max_samples:
+            chunks.append((cursor, len(audio)))
+            break
+        cut = _choose_rms_silence_cut_sample(
+            cursor_sample=cursor,
+            total_samples=len(audio),
+            sample_rate=sample_rate,
+            rms=rms,
+            centers=centers,
+            threshold=threshold,
+            cfg=cfg,
+        )
+        if cut <= cursor:
+            cut = min(len(audio), cursor + max_samples)
+        chunks.append((cursor, cut))
+        cursor = cut
+    return chunks
 
 
 def _transcribe_chunks(
@@ -426,15 +576,19 @@ def compute_full_prepass(
     asr_backend: AsrBackend,
     *,
     chunk_sec: float = 30.0,
+    chunk_mode: str = "vad",
+    rms_silence_cfg: RmsSilenceConfig = RmsSilenceConfig(),
     vad_cfg: VadConfig = VadConfig(),
     max_inference_batch_size: Optional[int] = None,
     source_label: str = "source",
 ) -> FullPrepass:
-    """Run VAD + 30s chunking + ASR and stitch into a single char stream."""
+    """Run chunk planning + ASR/alignment and stitch into a single char stream."""
     plan = prepare_full_prepass_plan(
         audio,
         sample_rate,
         chunk_sec=chunk_sec,
+        chunk_mode=chunk_mode,
+        rms_silence_cfg=rms_silence_cfg,
         vad_cfg=vad_cfg,
     )
     if not plan.chunks:
@@ -456,11 +610,19 @@ def prepare_full_prepass_plan(
     sample_rate: int,
     *,
     chunk_sec: float = 30.0,
+    chunk_mode: str = "vad",
+    rms_silence_cfg: RmsSilenceConfig = RmsSilenceConfig(),
     vad_cfg: VadConfig = VadConfig(),
 ) -> FullPrepassPlan:
     """Run non-ASR pre-pass planning and return source-local audio chunks."""
     if audio.size == 0:
         return FullPrepassPlan(chunks=[])
+
+    if chunk_mode == "rms_silence":
+        chunks = _rms_silence_chunks(audio, sample_rate, cfg=rms_silence_cfg)
+        return FullPrepassPlan(chunks=list(chunks))
+    if chunk_mode != "vad":
+        raise ValueError(f"Unsupported prepass chunk mode: {chunk_mode}")
 
     regions = _run_vad(audio, sample_rate, vad_cfg)
     chunks = _pack_regions_into_chunks(

@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", default="bfloat16", choices=("float16", "bfloat16", "float32"))
     parser.add_argument("--asr-max-batch-size", type=int, default=1)
+    parser.add_argument("--aligner-max-batch-size", type=int, default=1)
     parser.add_argument("--min-seg-sec", type=float, default=3.0)
     parser.add_argument("--max-seg-sec", type=float, default=10.0)
     parser.add_argument("--language", default=None)
@@ -39,6 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--preprocess-chunk-sec", type=float, default=30.0)
+    parser.add_argument("--preprocess-chunk-mode", default="rms_silence", choices=("vad", "rms_silence"))
+    parser.add_argument("--preprocess-min-chunk-sec", type=float, default=5.0)
+    parser.add_argument("--preprocess-max-chunk-sec", type=float, default=15.0)
+    parser.add_argument("--rms-silence-frame-ms", type=float, default=25.0)
+    parser.add_argument("--rms-silence-hop-ms", type=float, default=5.0)
+    parser.add_argument("--rms-silence-percentile", type=float, default=25.0)
+    parser.add_argument("--rms-silence-threshold-multiplier", type=float, default=1.8)
+    parser.add_argument("--rms-min-silence-ms", type=float, default=80.0)
     parser.add_argument("--vad-backend", default="auto", choices=("auto", "silero", "librosa"))
     parser.add_argument("--vad-threshold", type=float, default=0.5)
     parser.add_argument("--vad-min-speech-ms", type=int, default=250)
@@ -68,6 +77,16 @@ def args_to_config(args: argparse.Namespace):
         raise SystemExit("Invalid segment bounds: require 0 < min_seg_sec <= max_seg_sec.")
     if args.asr_max_batch_size <= 0:
         raise SystemExit("--asr-max-batch-size must be > 0.")
+    if args.aligner_max_batch_size <= 0:
+        raise SystemExit("--aligner-max-batch-size must be > 0.")
+    if (
+        args.preprocess_min_chunk_sec <= 0
+        or args.preprocess_max_chunk_sec <= 0
+        or args.preprocess_min_chunk_sec > args.preprocess_max_chunk_sec
+    ):
+        raise SystemExit(
+            "Invalid prepass chunk bounds: require 0 < preprocess_min_chunk_sec <= preprocess_max_chunk_sec."
+        )
 
     return RuleWorkflowConfig(
         input_path=input_path,
@@ -80,6 +99,7 @@ def args_to_config(args: argparse.Namespace):
         device=args.device,
         dtype=args.dtype,
         asr_max_batch_size=args.asr_max_batch_size,
+        aligner_max_batch_size=args.aligner_max_batch_size,
         min_seg_sec=args.min_seg_sec,
         max_seg_sec=args.max_seg_sec,
         language=args.language,
@@ -89,6 +109,14 @@ def args_to_config(args: argparse.Namespace):
         overwrite=args.overwrite,
         dry_run=args.dry_run,
         preprocess_chunk_sec=args.preprocess_chunk_sec,
+        preprocess_chunk_mode=args.preprocess_chunk_mode,
+        preprocess_min_chunk_sec=args.preprocess_min_chunk_sec,
+        preprocess_max_chunk_sec=args.preprocess_max_chunk_sec,
+        rms_silence_frame_ms=args.rms_silence_frame_ms,
+        rms_silence_hop_ms=args.rms_silence_hop_ms,
+        rms_silence_percentile=args.rms_silence_percentile,
+        rms_silence_threshold_multiplier=args.rms_silence_threshold_multiplier,
+        rms_min_silence_ms=args.rms_min_silence_ms,
         vad_backend=args.vad_backend,
         vad_threshold=args.vad_threshold,
         vad_min_speech_ms=args.vad_min_speech_ms,

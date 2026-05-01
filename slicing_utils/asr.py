@@ -118,6 +118,7 @@ class AsrBackend:
         device: str = "cuda:0",
         dtype: str = "bfloat16",
         max_inference_batch_size: int = 1,
+        max_aligner_batch_size: Optional[int] = None,
         max_new_tokens: int = 512,
         language: Optional[str] = None,
         backend_kwargs: Optional[dict[str, Any]] = None,
@@ -140,6 +141,11 @@ class AsrBackend:
         forced_aligner_kwargs = _coerce_torch_dtype_kwargs(dict(forced_aligner_kwargs or {}))
         self.backend = backend
         self.max_inference_batch_size = max_inference_batch_size
+        self.max_aligner_batch_size = (
+            max(1, int(max_aligner_batch_size))
+            if max_aligner_batch_size is not None
+            else max(1, int(max_inference_batch_size or 1))
+        )
         self._forced_aligner_cls = Qwen3ForcedAligner
         self._forced_aligner_path = resolved_aligner_path
         self._forced_aligner_kwargs = forced_aligner_kwargs
@@ -257,7 +263,7 @@ class AsrBackend:
             return alignments
 
         aligner = self._get_forced_aligner()
-        batch_size = max(1, int(self.max_inference_batch_size or 1))
+        batch_size = max(1, int(self.max_aligner_batch_size or 1))
         for offset in range(0, len(pending_audio), batch_size):
             audio_batch = pending_audio[offset : offset + batch_size]
             text_batch = pending_text[offset : offset + batch_size]

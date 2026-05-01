@@ -51,6 +51,21 @@ WebUI 可以运行下文介绍的主要流程：
 bash scripts/run_full_pipeline.sh configs/full_pipeline.env
 ```
 
+切分阶段默认会先把每个源音频预切成较短的 RMS 静音窗口，再对同一个短窗口执行
+ASR 和强制对齐：
+
+```bash
+PREPROCESS_CHUNK_MODE="rms_silence"
+PREPROCESS_MIN_CHUNK_SEC=5
+PREPROCESS_MAX_CHUNK_SEC=15
+ASR_MAX_BATCH_SIZE=1
+ALIGNER_MAX_BATCH_SIZE=1
+```
+
+`slide_rule` 和 `slide_LLM` 都会把这些短窗口的时间戳重新拼回源音频时间轴，
+然后再做标点修正和粗切分。若要使用旧的 VAD 打包 `PREPROCESS_CHUNK_SEC`
+逻辑，可以设置 `PREPROCESS_CHUNK_MODE="vad"`。
+
 配置文件是 bash env 文件，用来控制源音频目录、工作目录、启用的阶段、
 模型路径、切分模式、可选的说话人过滤和可选的音量归一化。各阶段输出会写到
 工作目录下：

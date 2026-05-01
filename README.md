@@ -68,6 +68,22 @@ optional volume normalization. Stage outputs are written under the workspace:
 Use `SLICE_MODE="rule"` for `slide_rule`, or `SLICE_MODE="llm"` with
 `LLM_MODEL` and provider settings for `slide_LLM`.
 
+By default, slicing now pre-cuts each source into RMS-silence windows before
+ASR/alignment:
+
+```bash
+PREPROCESS_CHUNK_MODE="rms_silence"
+PREPROCESS_MIN_CHUNK_SEC=5
+PREPROCESS_MAX_CHUNK_SEC=15
+ASR_MAX_BATCH_SIZE=1
+ALIGNER_MAX_BATCH_SIZE=1
+```
+
+This lets Qwen3-ASR and Qwen3-ForcedAligner see the same short audio window,
+then stitches timestamps back into a source-level stream before punctuation
+and rough cutting. Set `PREPROCESS_CHUNK_MODE="vad"` to use the older VAD-packed
+`PREPROCESS_CHUNK_SEC` behavior.
+
 Download the WebUI's default model checkpoints:
 
 ```cmd
