@@ -137,7 +137,7 @@ def _build_full_pipeline_tab() -> None:
             with gr.Row():
                 preprocess_workers = gr.Number(label="Preprocess workers", value=1, precision=0)
                 inference_batch_size = gr.Number(label="Inference batch size", value=1, precision=0)
-            zip_model = gr.Textbox(label="ZipEnhancer model", value="iic/speech_zipenhancer_ans_multiloss_16k_base")
+            zip_model = gr.Textbox(label="ZipEnhancer model", value=str(PROJECT_ROOT / "checkpoints" / "ZipEnhancer"))
             with gr.Row():
                 zip_normalize = gr.Dropdown(["match_original", "none", "library_median"], value="match_original", label="Zip normalize")
                 zip_alignment_metric = gr.Dropdown(["rms", "peak"], value="rms", label="Zip alignment metric")
@@ -294,7 +294,7 @@ def _build_single_stages_tab() -> None:
             with gr.Row():
                 d_workers = gr.Number(label="Preprocess workers", value=1, precision=0)
                 d_batch = gr.Number(label="Inference batch size", value=1, precision=0)
-            d_zip_model = gr.Textbox(label="ZipEnhancer model", value="iic/speech_zipenhancer_ans_multiloss_16k_base")
+            d_zip_model = gr.Textbox(label="ZipEnhancer model", value=str(PROJECT_ROOT / "checkpoints" / "ZipEnhancer"))
             with gr.Row():
                 d_zip_normalize = gr.Dropdown(["match_original", "none", "library_median"], value="match_original", label="Normalize")
                 d_zip_metric = gr.Dropdown(["rms", "peak"], value="rms", label="Alignment metric")
@@ -456,7 +456,7 @@ def _build_volume_tab() -> None:
 def _build_models_tab() -> None:
     with gr.Tab("Models"):
         gr.Markdown("Download checkpoints into the default folders used by the WebUI.")
-        download_models = gr.CheckboxGroup(["all", "qwen3", "asr", "aligner", "mossformer"], value=["all"], label="Models")
+        download_models = gr.CheckboxGroup(["all", "qwen3", "asr", "aligner", "mossformer", "zipenhancer", "speaker"], value=["all"], label="Models")
         download_provider = gr.Dropdown(["modelscope", "huggingface"], value="modelscope", label="Download source")
         download_path = gr.Textbox(label="Checkpoint root path", value=str(PROJECT_ROOT / "checkpoints"))
         download_asr_dir = gr.Textbox(label="ASR directory name", value="Qwen3-ASR-1.7B")

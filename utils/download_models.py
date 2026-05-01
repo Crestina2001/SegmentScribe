@@ -6,6 +6,8 @@ The WebUI defaults point at:
 - checkpoints/MossFormer2_SE_48K
 - checkpoints/Qwen3-ASR-1.7B
 - checkpoints/Qwen3-ForcedAligner-0.6B
+- checkpoints/ZipEnhancer
+- checkpoints/spkrec-ecapa-voxceleb
 
 This script prepares those folders in one command and skips existing models
 unless --force is passed.
@@ -24,15 +26,21 @@ MODEL_REPOS = {
         "asr": "Qwen/Qwen3-ASR-1.7B",
         "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
         "mossformer": "alibabasglab/MossFormer2_SE_48K",
+        "speaker": "speechbrain/spkrec-ecapa-voxceleb",
     },
     "modelscope": {
         "asr": "Qwen/Qwen3-ASR-1.7B",
         "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
         "mossformer": "alibabasglab/MossFormer2_SE_48K",
+        "zipenhancer": "iic/speech_zipenhancer_ans_multiloss_16k_base",
+        "speaker": "speechbrain/spkrec-ecapa-voxceleb",
     },
 }
 DEFAULT_DOWNLOAD_PATH = Path("checkpoints")
 DEFAULT_MOSSFORMER_DIR = Path("MossFormer2_SE_48K")
+DEFAULT_ZIPENHANCER_DIR = Path("ZipEnhancer")
+DEFAULT_SPEAKER_DIR = Path("spkrec-ecapa-voxceleb")
+ALL_MODELS = ("asr", "aligner", "mossformer", "zipenhancer", "speaker")
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=("all", "qwen3", "asr", "aligner", "mossformer"),
+        choices=("all", "qwen3", *ALL_MODELS),
         default=["all"],
         help="Models to download. Default: all.",
     )
@@ -85,6 +93,18 @@ def parse_args() -> argparse.Namespace:
         help="MossFormer checkpoint folder. Default: <download-path>/MossFormer2_SE_48K.",
     )
     parser.add_argument(
+        "--zipenhancer-dir",
+        type=Path,
+        default=DEFAULT_ZIPENHANCER_DIR,
+        help="ZipEnhancer folder name/path. Default: ZipEnhancer.",
+    )
+    parser.add_argument(
+        "--speaker-dir",
+        type=Path,
+        default=DEFAULT_SPEAKER_DIR,
+        help="SpeechBrain speaker embedding folder name/path. Default: spkrec-ecapa-voxceleb.",
+    )
+    parser.add_argument(
         "--asr-model-id",
         default=None,
         help="Override the provider model id for Qwen3 ASR.",
@@ -98,6 +118,16 @@ def parse_args() -> argparse.Namespace:
         "--mossformer-model-id",
         default=None,
         help="Override the provider model id for MossFormer2.",
+    )
+    parser.add_argument(
+        "--zipenhancer-model-id",
+        default=None,
+        help="Override the provider model id for ZipEnhancer.",
+    )
+    parser.add_argument(
+        "--speaker-model-id",
+        default=None,
+        help="Override the provider model id for the SpeechBrain speaker embedding model.",
     )
     parser.add_argument(
         "--force",
@@ -125,7 +155,7 @@ def resolve_model_dir(download_path: Path, model_dir: Path, root: Path) -> Path:
 
 def selected_models(raw_models: list[str]) -> set[str]:
     if "all" in raw_models:
-        return {"asr", "aligner", "mossformer"}
+        return set(ALL_MODELS)
     selected: set[str] = set()
     for model in raw_models:
         if model == "qwen3":
@@ -227,17 +257,32 @@ def model_id_for(args: argparse.Namespace, provider: str, target: str) -> str:
         "asr": args.asr_model_id,
         "aligner": args.aligner_model_id,
         "mossformer": args.mossformer_model_id,
+        "zipenhancer": args.zipenhancer_model_id,
+        "speaker": args.speaker_model_id,
     }
     if overrides[target]:
         return overrides[target]
+    if target not in MODEL_REPOS[provider]:
+        raise SystemExit(
+            f"No default {provider} model id is configured for '{target}'. "
+            f"Pass --{target}-model-id if you have a compatible repo, or use --provider modelscope."
+        )
     return MODEL_REPOS[provider][target]
 
 
-def print_webui_paths(asr_dir: Path, aligner_dir: Path, mossformer_dir: Path) -> None:
-    print("\nWebUI model paths:")
+def print_webui_paths(
+    asr_dir: Path,
+    aligner_dir: Path,
+    mossformer_dir: Path,
+    zipenhancer_dir: Path,
+    speaker_dir: Path,
+) -> None:
+    print("\nDefault local model paths:")
     print(f"  ASR model path           : {asr_dir}")
     print(f"  Forced aligner path      : {aligner_dir}")
     print(f"  MossFormer checkpoint    : {mossformer_dir}")
+    print(f"  ZipEnhancer model        : {zipenhancer_dir}")
+    print(f"  Speaker embedding model  : {speaker_dir}")
 
 
 def main() -> None:
@@ -248,6 +293,8 @@ def main() -> None:
     aligner_dir = resolve_model_dir(args.download_path, args.aligner_dir, root).resolve()
     mossformer_path = args.mossformer_path or args.download_path / DEFAULT_MOSSFORMER_DIR
     mossformer_dir = resolve_path(mossformer_path, root).resolve()
+    zipenhancer_dir = resolve_model_dir(args.download_path, args.zipenhancer_dir, root).resolve()
+    speaker_dir = resolve_model_dir(args.download_path, args.speaker_dir, root).resolve()
     provider = "huggingface" if args.provider == "hf" else args.provider
 
     targets = selected_models(args.models)
@@ -263,9 +310,20 @@ def main() -> None:
             args.force,
             marker=mossformer_dir / "last_best_checkpoint",
         )
+    if "zipenhancer" in targets:
+        download_model(model_id_for(args, provider, "zipenhancer"), provider, zipenhancer_dir, args.force)
+    if "speaker" in targets:
+        download_model(
+            model_id_for(args, provider, "speaker"),
+            provider,
+            speaker_dir,
+            args.force,
+            marker=speaker_dir / "hyperparams.yaml",
+        )
 
-    print_webui_paths(asr_dir, aligner_dir, mossformer_dir)
+    print_webui_paths(asr_dir, aligner_dir, mossformer_dir, zipenhancer_dir, speaker_dir)
     print(f"\nDownload path: {download_path.resolve()}")
+    print("Note: Demucs and Silero VAD are downloaded/cached by their own Python packages when used.")
     print("Done.")
 
 

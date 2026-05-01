@@ -154,7 +154,7 @@ def _build_full_pipeline_tab() -> None:
             with gr.Row():
                 preprocess_workers = gr.Number(label="预处理线程数", value=1, precision=0)
                 inference_batch_size = gr.Number(label="推理批大小", value=1, precision=0)
-            zip_model = gr.Textbox(label="ZipEnhancer 模型", value="iic/speech_zipenhancer_ans_multiloss_16k_base")
+            zip_model = gr.Textbox(label="ZipEnhancer 模型", value=str(PROJECT_ROOT / "checkpoints" / "ZipEnhancer"))
             with gr.Row():
                 zip_normalize = gr.Dropdown(["match_original", "none", "library_median"], value="match_original", label="Zip 音量对齐")
                 zip_alignment_metric = gr.Dropdown(["rms", "peak"], value="rms", label="Zip 对齐指标")
@@ -311,7 +311,7 @@ def _build_single_stages_tab() -> None:
             with gr.Row():
                 d_workers = gr.Number(label="预处理线程数", value=1, precision=0)
                 d_batch = gr.Number(label="推理批大小", value=1, precision=0)
-            d_zip_model = gr.Textbox(label="ZipEnhancer 模型", value="iic/speech_zipenhancer_ans_multiloss_16k_base")
+            d_zip_model = gr.Textbox(label="ZipEnhancer 模型", value=str(PROJECT_ROOT / "checkpoints" / "ZipEnhancer"))
             with gr.Row():
                 d_zip_normalize = gr.Dropdown(["match_original", "none", "library_median"], value="match_original", label="音量对齐")
                 d_zip_metric = gr.Dropdown(["rms", "peak"], value="rms", label="对齐指标")
@@ -473,7 +473,7 @@ def _build_volume_tab() -> None:
 def _build_models_tab() -> None:
     with gr.Tab("模型下载"):
         gr.Markdown("下载 WebUI 默认使用的模型 checkpoint。")
-        download_models = gr.CheckboxGroup(["all", "qwen3", "asr", "aligner", "mossformer"], value=["all"], label="模型")
+        download_models = gr.CheckboxGroup(["all", "qwen3", "asr", "aligner", "mossformer", "zipenhancer", "speaker"], value=["all"], label="模型")
         download_provider = gr.Dropdown(["modelscope", "huggingface"], value="modelscope", label="下载来源")
         download_path = gr.Textbox(label="检查点根目录", value=str(PROJECT_ROOT / "checkpoints"))
         download_asr_dir = gr.Textbox(label="ASR 目录名", value="Qwen3-ASR-1.7B")

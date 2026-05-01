@@ -71,16 +71,18 @@ bash scripts/run_full_pipeline.sh configs/full_pipeline.env
 python utils/download_models.py --models all --download_path checkpoints
 ```
 
-该命令会在 `checkpoints/` 下准备 MossFormer2、Qwen3-ASR 和 Qwen3 forced aligner
-的默认路径。WebUI 的 **Models** 标签页中也提供同样的下载入口。
-`--download_path` 是本地 checkpoint 目标目录；使用 `--provider modelscope`
-或 `--provider hf` 为所有选中的模型选择下载来源。
+该命令会在 `checkpoints/` 下准备 Qwen3-ASR、Qwen3 forced aligner、MossFormer2、
+ZipEnhancer 和 SpeechBrain 说话人 embedding 模型的默认路径。WebUI 的
+**Models** 标签页中也提供同样的下载入口。`--download_path` 是本地 checkpoint
+目标目录；使用 `--provider modelscope` 或 `--provider hf` 为选中的模型选择下载来源。
+ZipEnhancer 目前只有可验证的 ModelScope 模型 ID，因此使用 `--provider hf` 时请不要选择
+`zipenhancer`。
 
 示例：
 
 ```cmd
 python utils/download_models.py --models all --provider modelscope --download_path checkpoints
-python utils/download_models.py --models all --provider hf --download_path checkpoints
+python utils/download_models.py --models qwen3 mossformer speaker --provider hf --download_path checkpoints
 ```
 
 安装 `ffmpeg`，用于音频格式转换和处理非 WAV 输入：

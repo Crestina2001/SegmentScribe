@@ -74,17 +74,19 @@ Download the WebUI's default model checkpoints:
 python utils/download_models.py --models all --download_path checkpoints
 ```
 
-This prepares the default WebUI paths under `checkpoints/` for MossFormer2,
-Qwen3-ASR, and the Qwen3 forced aligner. The same download command is also
-available from the WebUI's **Models** tab. `--download_path` is the local
-checkpoint destination. Use `--provider modelscope` or `--provider hf` to pick
-the download source for all selected models.
+This prepares the default WebUI paths under `checkpoints/` for Qwen3-ASR, the
+Qwen3 forced aligner, MossFormer2, ZipEnhancer, and the SpeechBrain speaker
+embedding model. The same download command is also available from the WebUI's
+**Models** tab. `--download_path` is the local checkpoint destination. Use
+`--provider modelscope` or `--provider hf` to pick the download source for the
+selected models. ZipEnhancer is currently ModelScope-only, so omit
+`zipenhancer` when using `--provider hf`.
 
 Examples:
 
 ```cmd
 python utils/download_models.py --models all --provider modelscope --download_path checkpoints
-python utils/download_models.py --models all --provider hf --download_path checkpoints
+python utils/download_models.py --models qwen3 mossformer speaker --provider hf --download_path checkpoints
 ```
 
 Install `ffmpeg` for audio conversion and non-WAV inputs:
