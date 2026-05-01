@@ -19,10 +19,17 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
+from tqdm.auto import tqdm
 
 ASR_SAMPLE_RATE = 16000
 DTYPE_NAMES = {"float16", "bfloat16", "float32"}
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _AsrOnlyResult:
+    text: str
+    language: str
 
 
 def resolve_model_path(path: str, *, label: str = "model") -> str:
@@ -194,6 +201,35 @@ class AsrBackend:
         windows: Sequence[tuple[np.ndarray, int]],
     ) -> list[WindowTranscript]:
         """Transcribe a batch of windows and return results in input order."""
+        prepared, durations = self._prepare_windows(windows)
+        results = self._run_asr(prepared)
+        alignments = self._align_transcripts(prepared, results)
+        return self._build_transcripts(results, alignments, durations)
+
+    def transcribe_windows_asr_only(
+        self,
+        windows: Sequence[tuple[np.ndarray, int]],
+    ) -> list[WindowTranscript]:
+        """Run only Qwen3-ASR for a batch, without forced alignment."""
+        prepared, durations = self._prepare_windows(windows)
+        results = self._run_asr(prepared)
+        return self._build_transcripts(results, [None] * len(results), durations)
+
+    def align_window_transcripts(
+        self,
+        windows: Sequence[tuple[np.ndarray, int]],
+        transcripts: Sequence[WindowTranscript],
+    ) -> list[WindowTranscript]:
+        """Run forced alignment for existing ASR text over matching windows."""
+        prepared, durations = self._prepare_windows(windows)
+        results = [_AsrOnlyResult(text=tr.text, language=tr.language) for tr in transcripts]
+        alignments = self._align_transcripts(prepared, results)
+        return self._build_transcripts(results, alignments, durations)
+
+    def _prepare_windows(
+        self,
+        windows: Sequence[tuple[np.ndarray, int]],
+    ) -> tuple[list[tuple[np.ndarray, int]], list[float]]:
         prepared: list[tuple[np.ndarray, int]] = []
         durations: list[float] = []
         for audio, sample_rate in windows:
@@ -207,13 +243,21 @@ class AsrBackend:
                 audio = audio.astype(np.float32, copy=False)
             prepared.append((audio, sample_rate))
             durations.append(float(len(audio) / sample_rate) if sample_rate > 0 else 0.0)
+        return prepared, durations
 
-        results = self.model.transcribe(
+    def _run_asr(self, prepared: Sequence[tuple[np.ndarray, int]]) -> list[Any]:
+        return list(self.model.transcribe(
             audio=prepared,
             language=self.language,
             return_time_stamps=False,
-        )
-        alignments = self._align_transcripts(prepared, results)
+        ))
+
+    def _build_transcripts(
+        self,
+        results: Sequence[Any],
+        alignments: Sequence[Any | None],
+        durations: Sequence[float],
+    ) -> list[WindowTranscript]:
         transcripts: list[WindowTranscript] = []
         for result, alignment, duration_sec in zip(results, alignments, durations):
             chars: list[CharToken] = []
@@ -264,24 +308,29 @@ class AsrBackend:
 
         aligner = self._get_forced_aligner()
         batch_size = max(1, int(self.max_aligner_batch_size or 1))
-        for offset in range(0, len(pending_audio), batch_size):
-            audio_batch = pending_audio[offset : offset + batch_size]
-            text_batch = pending_text[offset : offset + batch_size]
-            language_batch = pending_language[offset : offset + batch_size]
-            index_batch = pending_indices[offset : offset + batch_size]
-            logger.info(
-                "Qwen3-ForcedAligner processing transcript(s) %d-%d/%d",
-                offset + 1,
-                offset + len(audio_batch),
-                len(pending_audio),
-            )
-            aligned_batch = aligner.align(
-                audio=audio_batch,
-                text=text_batch,
-                language=language_batch,
-            )
-            for index, alignment in zip(index_batch, aligned_batch):
-                alignments[index] = alignment
+        progress = tqdm(
+            total=len(pending_audio),
+            desc="Qwen3-ForcedAligner",
+            unit="win",
+            dynamic_ncols=True,
+            leave=False,
+        )
+        try:
+            for offset in range(0, len(pending_audio), batch_size):
+                audio_batch = pending_audio[offset : offset + batch_size]
+                text_batch = pending_text[offset : offset + batch_size]
+                language_batch = pending_language[offset : offset + batch_size]
+                index_batch = pending_indices[offset : offset + batch_size]
+                aligned_batch = aligner.align(
+                    audio=audio_batch,
+                    text=text_batch,
+                    language=language_batch,
+                )
+                for index, alignment in zip(index_batch, aligned_batch):
+                    alignments[index] = alignment
+                progress.update(len(audio_batch))
+        finally:
+            progress.close()
         return alignments
 
     def _get_forced_aligner(self) -> Any:
@@ -292,6 +341,13 @@ class AsrBackend:
                 **self._forced_aligner_kwargs,
             )
         return self._forced_aligner
+
+
+def _should_log_progress(offset: int, batch_len: int, total: int, batch_size: int) -> bool:
+    if total <= 10 or batch_size > 1:
+        return True
+    current = offset + batch_len
+    return offset == 0 or current >= total or current % 10 == 0
 
 
 def _coerce_torch_dtype_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:

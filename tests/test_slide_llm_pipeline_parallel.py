@@ -97,19 +97,25 @@ async def test_slide_llm_batches_asr_chunks_across_sources(tmp_path, monkeypatch
             chunks = [(0, 10)]
         return SimpleNamespace(chunks=chunks)
 
-    def fake_transcribe_chunk_windows(windows, asr_backend):
-        ids = [int(audio[0]) for audio, _sample_rate, _span in windows]
+    def fake_asr_only(self, windows):
+        ids = [int(audio[0]) for audio, _sample_rate in windows]
         with lock:
             asr_batches.append(ids)
             events.append(("asr_batch", ",".join(str(item) for item in ids)))
         time.sleep(0.03)
         return [
+            SimpleNamespace(text="a", language="zh")
+            for _audio, _sample_rate in windows
+        ]
+
+    def fake_align_draft_chunk_windows(windows, drafts, asr_backend):
+        return [
             (
-                "a",
+                draft.text,
                 [CharToken(idx=0, char="a", start_sec=0.0, end_sec=0.1)],
-                span,
+                draft.span,
             )
-            for _audio, _sample_rate, span in windows
+            for draft in drafts
         ]
 
     class TrackingClient(_FakeUnifiedClient):
@@ -136,10 +142,11 @@ async def test_slide_llm_batches_asr_chunks_across_sources(tmp_path, monkeypatch
         return Phase3Result()
 
     monkeypatch.setattr(pipeline, "AsrBackend", _DummyAsrBackend)
+    monkeypatch.setattr(_DummyAsrBackend, "transcribe_windows_asr_only", fake_asr_only, raising=False)
     monkeypatch.setattr(pipeline, "UnifiedClient", TrackingClient)
     monkeypatch.setattr(pipeline, "load_audio_mono", fake_load_audio)
     monkeypatch.setattr(pipeline, "prepare_full_prepass_plan", fake_prepare_full_prepass_plan)
-    monkeypatch.setattr(pipeline, "transcribe_chunk_windows", fake_transcribe_chunk_windows)
+    monkeypatch.setattr(pipeline, "align_draft_chunk_windows", fake_align_draft_chunk_windows)
     monkeypatch.setattr(pipeline, "assemble_full_prepass", lambda *args: _prepass())
     monkeypatch.setattr(pipeline, "run_llm_punctuation_phase", fake_punctuation)
     monkeypatch.setattr(pipeline, "run_llm_rough_cut_phase", fake_rough_cut)

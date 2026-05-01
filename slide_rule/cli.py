@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--forced-aligner-kwargs", default="{}")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", default="bfloat16", choices=("float16", "bfloat16", "float32"))
-    parser.add_argument("--asr-max-batch-size", type=int, default=1)
+    parser.add_argument("--asr-max-batch-size", type=int, default=8)
     parser.add_argument("--aligner-max-batch-size", type=int, default=1)
     parser.add_argument("--min-seg-sec", type=float, default=3.0)
     parser.add_argument("--max-seg-sec", type=float, default=10.0)
@@ -140,6 +140,8 @@ def configure_logging() -> None:
     """Configure stderr-only runtime logs for slide_rule."""
     _configure_package_logger("slide_rule")
     _configure_package_logger("slicing_utils")
+    logging.getLogger("transformers.generation.utils").setLevel(logging.ERROR)
+    logging.getLogger("transformers.generation.configuration_utils").setLevel(logging.ERROR)
 
 
 def _configure_package_logger(name: str) -> None:

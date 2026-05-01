@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from .asr import AsrBackend, CharToken
 from .preprocess import (
@@ -322,50 +323,61 @@ def _transcribe_chunks(
     source_label: str = "source",
 ) -> list[tuple[str, list[CharToken], tuple[int, int]]]:
     batch_size = max(1, int(max_inference_batch_size or 1))
-    results: list[tuple[str, list[CharToken], tuple[int, int]]] = []
+    asr_results: list[AsrChunkDraft] = []
     total = len(chunks)
-    for i in range(0, total, batch_size):
-        batch = chunks[i : i + batch_size]
-        batch_start = i + 1
-        batch_end = i + len(batch)
-        logger.info(
-            "Qwen3-ASR processing %s chunk(s) %d-%d/%d",
-            source_label,
-            batch_start,
-            batch_end,
-            total,
-        )
-        windows: list[tuple[np.ndarray, int]] = [
-            (np.ascontiguousarray(audio[start:end], dtype=np.float32), sample_rate)
-            for start, end in batch
-        ]
-        try:
-            transcripts = asr_backend.transcribe_windows(windows)
-        except Exception as exc:
-            logger.warning(
-                "Pre-pass ASR failed on %s batch starting at chunk %d: %s",
-                source_label,
-                i,
-                exc,
-            )
-            transcripts = []
-        if len(transcripts) != len(batch):
-            for span in batch[len(transcripts):]:
-                results.append(("", [], span))
-        pairs = list(zip(batch[: len(transcripts)], transcripts))
-        for (start, end), tr in pairs:
-            offset = start / float(sample_rate)
-            shifted = [
-                CharToken(
-                    idx=c.idx,
-                    char=c.char,
-                    start_sec=float(c.start_sec) + offset,
-                    end_sec=float(c.end_sec) + offset,
-                )
-                for c in tr.chars
+    logger.info(
+        "Qwen3-ASR processing %s: chunks=%d batch_size=%d",
+        source_label,
+        total,
+        batch_size,
+    )
+    progress = tqdm(
+        total=total,
+        desc="Qwen3-ASR",
+        unit="win",
+        dynamic_ncols=True,
+        leave=False,
+    )
+    try:
+        for i in range(0, total, batch_size):
+            batch = chunks[i : i + batch_size]
+            windows: list[tuple[np.ndarray, int]] = [
+                (np.ascontiguousarray(audio[start:end], dtype=np.float32), sample_rate)
+                for start, end in batch
             ]
-            results.append((str(tr.text or ""), shifted, (start, end)))
-    return results
+            try:
+                transcripts = asr_backend.transcribe_windows_asr_only(windows)
+            except Exception as exc:
+                logger.warning(
+                    "Pre-pass ASR failed on %s batch starting at chunk %d: %s",
+                    source_label,
+                    i,
+                    exc,
+                )
+                transcripts = []
+            for item_index, (start, end) in enumerate(batch):
+                if item_index < len(transcripts):
+                    tr = transcripts[item_index]
+                    asr_results.append(
+                        AsrChunkDraft(
+                            text=str(tr.text or ""),
+                            language=str(tr.language or ""),
+                            span=(start, end),
+                        )
+                    )
+                else:
+                    asr_results.append(AsrChunkDraft(text="", language="", span=(start, end)))
+            progress.update(len(batch))
+    finally:
+        progress.close()
+
+    return _align_transcribed_chunks(
+        audio,
+        sample_rate,
+        asr_results,
+        asr_backend,
+        source_label=source_label,
+    )
 
 
 def transcribe_chunk_windows(
@@ -381,9 +393,47 @@ def transcribe_chunk_windows(
         (np.ascontiguousarray(audio, dtype=np.float32), sample_rate)
         for audio, sample_rate, _span in windows
     ]
-    transcripts = asr_backend.transcribe_windows(prepared)
+    transcripts = asr_backend.transcribe_windows_asr_only(prepared)
+    asr_results: list[AsrChunkDraft] = []
+    for (_audio, _sample_rate, (start, end)), tr in zip(windows[: len(transcripts)], transcripts):
+        asr_results.append(
+            AsrChunkDraft(
+                text=str(tr.text or ""),
+                language=str(tr.language or ""),
+                span=(start, end),
+            )
+        )
+    return align_draft_chunk_windows(windows[: len(asr_results)], asr_results, asr_backend)
+
+
+def align_chunk_windows(
+    windows: Sequence[tuple[np.ndarray, int, tuple[int, int]]],
+    transcribed: Sequence[tuple[str, list[CharToken], tuple[int, int]]],
+    asr_backend: AsrBackend,
+) -> list[tuple[str, list[CharToken], tuple[int, int]]]:
+    drafts = [
+        AsrChunkDraft(text=text, language="", span=span)
+        for text, _chars, span in transcribed
+    ]
+    return align_draft_chunk_windows(windows, drafts, asr_backend)
+
+
+def align_draft_chunk_windows(
+    windows: Sequence[tuple[np.ndarray, int, tuple[int, int]]],
+    transcribed: Sequence["AsrChunkDraft"],
+    asr_backend: AsrBackend,
+) -> list[tuple[str, list[CharToken], tuple[int, int]]]:
+    prepared: list[tuple[np.ndarray, int]] = [
+        (np.ascontiguousarray(audio, dtype=np.float32), sample_rate)
+        for audio, sample_rate, _span in windows
+    ]
+    transcripts = [
+        WindowTranscriptShim(text=draft.text, language=draft.language, chars=[], duration_sec=0.0)
+        for draft in transcribed
+    ]
+    aligned = asr_backend.align_window_transcripts(prepared, transcripts)
     results: list[tuple[str, list[CharToken], tuple[int, int]]] = []
-    for (_audio, sample_rate, (start, end)), tr in zip(windows[: len(transcripts)], transcripts):
+    for (_audio, sample_rate, (start, end)), draft, tr in zip(windows[: len(aligned)], transcribed, aligned):
         offset = start / float(sample_rate)
         shifted = [
             CharToken(
@@ -394,7 +444,61 @@ def transcribe_chunk_windows(
             )
             for c in tr.chars
         ]
-        results.append((str(tr.text or ""), shifted, (start, end)))
+        results.append((str(draft.text or ""), shifted, (start, end)))
+    return results
+
+
+@dataclass
+class WindowTranscriptShim:
+    text: str
+    language: str
+    chars: list[CharToken]
+    duration_sec: float
+
+
+@dataclass(frozen=True)
+class AsrChunkDraft:
+    text: str
+    language: str
+    span: tuple[int, int]
+
+
+def _align_transcribed_chunks(
+    audio: np.ndarray,
+    sample_rate: int,
+    transcribed: Sequence[AsrChunkDraft],
+    asr_backend: AsrBackend,
+    *,
+    source_label: str = "source",
+) -> list[tuple[str, list[CharToken], tuple[int, int]]]:
+    if not transcribed:
+        return []
+    total = len(transcribed)
+    results: list[tuple[str, list[CharToken], tuple[int, int]]] = [
+        ("", [], draft.span) for draft in transcribed
+    ]
+    pending_windows: list[tuple[np.ndarray, int, tuple[int, int]]] = []
+    pending_transcribed: list[AsrChunkDraft] = []
+    pending_indices: list[int] = []
+    for index, draft in enumerate(transcribed):
+        if not str(draft.text or "").strip():
+            continue
+        start, end = draft.span
+        pending_windows.append(
+            (np.ascontiguousarray(audio[start:end], dtype=np.float32), sample_rate, (start, end))
+        )
+        pending_transcribed.append(draft)
+        pending_indices.append(index)
+    if pending_windows:
+        logger.info(
+            "Qwen3-ForcedAligner processing %s: transcript_chunks=%d/%d",
+            source_label,
+            len(pending_windows),
+            total,
+        )
+        aligned = align_draft_chunk_windows(pending_windows, pending_transcribed, asr_backend)
+        for index, item in zip(pending_indices, aligned):
+            results[index] = item
     return results
 
 
