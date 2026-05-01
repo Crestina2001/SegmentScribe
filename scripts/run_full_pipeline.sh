@@ -256,6 +256,8 @@ if is_true "${DO_SPEAKER_FILTER:-false}"; then
     --output-jsonl "${FILTERED_JSONL}"
     --dataset-root "${ACTIVE_DATASET_ROOT}"
     --device "${SPEAKER_DEVICE:-${DEVICE:-cuda:0}}"
+    --model-source "${SPEAKER_MODEL_SOURCE:-checkpoints/spkrec-ecapa-voxceleb}"
+    --model-dir "${SPEAKER_MODEL_DIR:-checkpoints/spkrec-ecapa-voxceleb}"
     --mad-multiplier "${SPEAKER_MAD_MULTIPLIER:-3.0}"
     --max-prune-ratio "${SPEAKER_MAX_PRUNE_RATIO:-0.10}"
     --min-rows "${SPEAKER_MIN_ROWS:-8}"

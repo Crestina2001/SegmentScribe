@@ -42,6 +42,13 @@ DEFAULT_DOWNLOAD_PATH = Path("checkpoints")
 DEFAULT_MOSSFORMER_DIR = Path("MossFormer2_SE_48K")
 DEFAULT_ZIPENHANCER_DIR = Path("ZipEnhancer")
 DEFAULT_SPEAKER_DIR = Path("spkrec-ecapa-voxceleb")
+SPEAKER_REQUIRED_FILES = (
+    "hyperparams.yaml",
+    "label_encoder.txt",
+    "embedding_model.ckpt",
+    "mean_var_norm_emb.ckpt",
+    "classifier.ckpt",
+)
 DEFAULT_DEMUCS_MODELS = ("htdemucs", "htdemucs_ft")
 ALL_MODELS = (
     "asr",
@@ -193,9 +200,31 @@ def _missing_indexed_weight_files(destination: Path) -> list[Path] | None:
     return None
 
 
-def destination_is_complete(destination: Path, marker: Path | None = None) -> bool:
+def destination_has_required_files(destination: Path, required_files: tuple[str, ...]) -> bool:
+    missing = [filename for filename in required_files if not _path_exists(destination / filename)]
+    if not missing:
+        return True
+    shown = "\n".join(f"  - {filename}" for filename in missing)
+    print(f"Incomplete checkpoint: {destination}\nMissing required files:\n{shown}")
+    return False
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def destination_is_complete(
+    destination: Path,
+    marker: Path | None = None,
+    required_files: tuple[str, ...] = (),
+) -> bool:
     if not destination.exists():
         return False
+    if required_files:
+        return destination_has_required_files(destination, required_files)
     if marker is not None and marker.exists():
         return True
 
@@ -218,10 +247,15 @@ def destination_is_complete(destination: Path, marker: Path | None = None) -> bo
     return False
 
 
-def skip_existing(destination: Path, force: bool, marker: Path | None = None) -> bool:
+def skip_existing(
+    destination: Path,
+    force: bool,
+    marker: Path | None = None,
+    required_files: tuple[str, ...] = (),
+) -> bool:
     if force:
         return False
-    if destination_is_complete(destination, marker):
+    if destination_is_complete(destination, marker, required_files):
         print(f"Already exists: {destination}")
         return True
     return False
@@ -287,8 +321,9 @@ def download_model(
     force: bool,
     *,
     marker: Path | None = None,
+    required_files: tuple[str, ...] = (),
 ) -> None:
-    if skip_existing(destination, force, marker=marker):
+    if skip_existing(destination, force, marker=marker, required_files=required_files):
         return
     destination.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {model_id}")
@@ -366,7 +401,7 @@ def main() -> None:
             provider,
             speaker_dir,
             args.force,
-            marker=speaker_dir / "hyperparams.yaml",
+            required_files=SPEAKER_REQUIRED_FILES,
         )
     if "demucs" in targets:
         download_demucs_models(args.demucs_models, args.force)
