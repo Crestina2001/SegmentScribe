@@ -181,6 +181,10 @@ if is_true "${DO_SLICE:-true}"; then
   if [[ "${SLICE_MODE:-rule}" == "llm" ]]; then
     SLICE_MODULE="slide_LLM"
   fi
+  ASR_BACKEND_KWARGS_VALUE="${ASR_BACKEND_KWARGS:-}"
+  if [[ -z "${ASR_BACKEND_KWARGS_VALUE}" ]]; then
+    ASR_BACKEND_KWARGS_VALUE="{}"
+  fi
 
   COMMAND=(
     "${PYTHON_BIN}" -m "${SLICE_MODULE}"
@@ -189,7 +193,7 @@ if is_true "${DO_SLICE:-true}"; then
     --model-path "${ASR_MODEL_PATH:-checkpoints/Qwen3-ASR-1.7B}"
     --aligner-path "${ALIGNER_PATH:-checkpoints/Qwen3-ForcedAligner-0.6B}"
     --asr-backend "${ASR_BACKEND:-transformers}"
-    --asr-backend-kwargs "${ASR_BACKEND_KWARGS:-{}}"
+    --asr-backend-kwargs "${ASR_BACKEND_KWARGS_VALUE}"
     --device "${DEVICE:-cuda:0}"
     --dtype "${DTYPE:-bfloat16}"
     --asr-max-batch-size "${ASR_MAX_BATCH_SIZE:-1}"
