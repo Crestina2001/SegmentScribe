@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from .asr import AsrBackend, CharToken
 from .preprocess import (
@@ -172,37 +173,42 @@ def _transcribe_chunks(
 ) -> list[tuple[str, list[CharToken], tuple[int, int]]]:
     batch_size = max(1, int(max_inference_batch_size or 1))
     results: list[tuple[str, list[CharToken], tuple[int, int]]] = []
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i : i + batch_size]
-        windows: list[tuple[np.ndarray, int]] = [
-            (np.ascontiguousarray(audio[start:end], dtype=np.float32), sample_rate)
-            for start, end in batch
-        ]
-        try:
-            transcripts = asr_backend.transcribe_windows(windows)
-        except Exception as exc:
-            logger.warning(
-                "Pre-pass ASR failed on batch starting at chunk %d: %s",
-                i,
-                exc,
-            )
-            transcripts = []
-        if len(transcripts) != len(batch):
-            for span in batch[len(transcripts):]:
-                results.append(("", [], span))
-        pairs = list(zip(batch[: len(transcripts)], transcripts))
-        for (start, end), tr in pairs:
-            offset = start / float(sample_rate)
-            shifted = [
-                CharToken(
-                    idx=c.idx,
-                    char=c.char,
-                    start_sec=float(c.start_sec) + offset,
-                    end_sec=float(c.end_sec) + offset,
-                )
-                for c in tr.chars
+    progress = tqdm(total=len(chunks), desc="Qwen3-ASR", unit="chunk")
+    try:
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i : i + batch_size]
+            windows: list[tuple[np.ndarray, int]] = [
+                (np.ascontiguousarray(audio[start:end], dtype=np.float32), sample_rate)
+                for start, end in batch
             ]
-            results.append((str(tr.text or ""), shifted, (start, end)))
+            try:
+                transcripts = asr_backend.transcribe_windows(windows)
+            except Exception as exc:
+                logger.warning(
+                    "Pre-pass ASR failed on batch starting at chunk %d: %s",
+                    i,
+                    exc,
+                )
+                transcripts = []
+            if len(transcripts) != len(batch):
+                for span in batch[len(transcripts):]:
+                    results.append(("", [], span))
+            pairs = list(zip(batch[: len(transcripts)], transcripts))
+            for (start, end), tr in pairs:
+                offset = start / float(sample_rate)
+                shifted = [
+                    CharToken(
+                        idx=c.idx,
+                        char=c.char,
+                        start_sec=float(c.start_sec) + offset,
+                        end_sec=float(c.end_sec) + offset,
+                    )
+                    for c in tr.chars
+                ]
+                results.append((str(tr.text or ""), shifted, (start, end)))
+            progress.update(len(batch))
+    finally:
+        progress.close()
     return results
 
 

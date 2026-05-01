@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from llm_gateway import UnifiedClient
 from slicing_utils.asr import AsrBackend
@@ -86,6 +87,7 @@ class AsrBatcher:
         self._max_batch_size = max(1, int(max_batch_size))
         self._queue: asyncio.Queue[_AsrChunkRequest | None] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
+        self._progress: Any = None
 
     def start(self) -> None:
         if self._worker is None:
@@ -97,6 +99,9 @@ class AsrBatcher:
         await self._queue.put(None)
         await self._worker
         self._worker = None
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
 
     async def transcribe_source(
         self,
@@ -109,6 +114,7 @@ class AsrBatcher:
             return []
         loop = asyncio.get_running_loop()
         requests: list[_AsrChunkRequest] = []
+        self._add_progress_total(len(chunks))
         for start, end in chunks:
             request = _AsrChunkRequest(
                 audio=np.ascontiguousarray(audio[start:end], dtype=np.float32),
@@ -152,6 +158,16 @@ class AsrBatcher:
         for request, result in zip(batch, padded):
             if not request.future.done():
                 request.future.set_result(result)
+        if self._progress is not None:
+            self._progress.update(len(batch))
+
+    def _add_progress_total(self, count: int) -> None:
+        if count <= 0:
+            return
+        if self._progress is None:
+            self._progress = tqdm(total=0, desc="Qwen3-ASR", unit="chunk")
+        self._progress.total = int(self._progress.total or 0) + count
+        self._progress.refresh()
 
 
 class SlideLLMPipeline:

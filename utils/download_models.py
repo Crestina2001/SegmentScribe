@@ -14,6 +14,7 @@ unless --force is passed.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -134,17 +135,46 @@ def selected_models(raw_models: list[str]) -> set[str]:
     return selected
 
 
-def destination_has_files(destination: Path) -> bool:
-    return destination.exists() and any(destination.iterdir())
+def _missing_indexed_weight_files(destination: Path) -> list[Path] | None:
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_path = destination / index_name
+        if not index_path.exists():
+            continue
+        index_data = json.loads(index_path.read_text(encoding="utf-8"))
+        weight_files = set(index_data.get("weight_map", {}).values())
+        return sorted(destination / filename for filename in weight_files if not (destination / filename).exists())
+    return None
+
+
+def destination_is_complete(destination: Path, marker: Path | None = None) -> bool:
+    if not destination.exists():
+        return False
+    if marker is not None and marker.exists():
+        return True
+
+    missing_weight_files = _missing_indexed_weight_files(destination)
+    if missing_weight_files is not None:
+        if missing_weight_files:
+            missing = "\n".join(f"  - {path.name}" for path in missing_weight_files[:8])
+            print(f"Incomplete checkpoint: {destination}\nMissing indexed weight files:\n{missing}")
+            return False
+        return True
+
+    complete_weight_names = (
+        "model.safetensors",
+        "pytorch_model.bin",
+        "last_best_checkpoint",
+    )
+    if any((destination / filename).exists() for filename in complete_weight_names):
+        return True
+
+    return False
 
 
 def skip_existing(destination: Path, force: bool, marker: Path | None = None) -> bool:
     if force:
         return False
-    if marker is not None and marker.exists():
-        print(f"Already exists: {destination}")
-        return True
-    if destination_has_files(destination):
+    if destination_is_complete(destination, marker):
         print(f"Already exists: {destination}")
         return True
     return False
