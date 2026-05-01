@@ -20,6 +20,7 @@ from typing import Any, Sequence
 import librosa
 import numpy as np
 import soundfile as sf
+from tqdm.auto import tqdm
 
 
 EPSILON = 1e-12
@@ -488,7 +489,8 @@ def main() -> None:
     print(f"Target loudness: {args.target_lufs:.1f} LUFS")
     print(f"Analyzing {len(records)} JSONL-listed segment audio file(s)...")
     stats: list[AudioStats] = []
-    for offset, record in enumerate(records, start=1):
+    analysis_progress = tqdm(records, desc="Volume analysis", unit="seg", dynamic_ncols=True)
+    for record in analysis_progress:
         try:
             item = measure_record(record, pyln, args.silence_top_db)
         except Exception as exc:  # noqa: BLE001 - report the exact row and stop.
@@ -496,9 +498,9 @@ def main() -> None:
                 f"Failed to measure JSONL row {record.index} ({record.audio_relpath}): {exc}"
             ) from exc
         stats.append(item)
-        print(
-            f"[{offset}/{len(records)}] row {record.index}: {record.audio_relpath} "
-            f"{item.lufs:.1f} LUFS, peak {item.peak_dbfs:.1f} dBFS"
+        analysis_progress.set_postfix_str(
+            f"row {record.index} {item.lufs:.1f} LUFS peak {item.peak_dbfs:.1f} dBFS",
+            refresh=False,
         )
 
     decisions = {
@@ -544,7 +546,8 @@ def main() -> None:
         return
 
     manifest_rows: list[tuple[AudioStats, Path, NormalizeResult]] = []
-    for offset, item in enumerate(kept_stats, start=1):
+    normalize_progress = tqdm(kept_stats, desc="Volume normalize", unit="seg", dynamic_ncols=True)
+    for item in normalize_progress:
         output_audio_path = output_dir / item.record.output_audio_relpath
         result = normalize_file(
             source_path=item.record.source_audio_path,
@@ -556,9 +559,9 @@ def main() -> None:
         )
         manifest_rows.append((item, output_audio_path, result))
         suffix = " peak-limited" if result.peak_limited else ""
-        print(
-            f"[{offset}/{len(kept_stats)}] wrote {output_audio_path} "
-            f"(gain {result.applied_gain_db:+.1f} dB{suffix})"
+        normalize_progress.set_postfix_str(
+            f"row {item.record.index} gain {result.applied_gain_db:+.1f} dB{suffix}",
+            refresh=False,
         )
 
     write_jsonl(output_jsonl_path, [normalized_payload(item.record) for item in kept_stats])

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import numpy as np
+from tqdm.auto import tqdm
 
 
 MODEL_SOURCE = "speechbrain/spkrec-ecapa-voxceleb"
@@ -238,10 +239,11 @@ def build_score_rows(
 
 def extract_embeddings(records: Sequence[JsonlRecord], extractor: EmbeddingExtractor) -> np.ndarray:
     embeddings: list[np.ndarray] = []
-    for offset, record in enumerate(records, start=1):
+    progress = tqdm(records, desc="Speaker embeddings", unit="seg", dynamic_ncols=True)
+    for record in progress:
         embedding = l2_normalize(extractor(record.audio_path))
         embeddings.append(embedding)
-        print(f"[{offset}/{len(records)}] embedded row {record.line_number}: {record.audio_relpath}")
+        progress.set_postfix_str(f"row {record.line_number}", refresh=False)
     return np.stack(embeddings, axis=0).astype(np.float32, copy=False)
 
 
