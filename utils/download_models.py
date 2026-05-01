@@ -8,6 +8,8 @@ The WebUI defaults point at:
 - checkpoints/Qwen3-ForcedAligner-0.6B
 - checkpoints/ZipEnhancer
 - checkpoints/spkrec-ecapa-voxceleb
+- Demucs package cache for htdemucs and htdemucs_ft
+- Silero VAD package cache
 
 This script prepares those folders in one command and skips existing models
 unless --force is passed.
@@ -40,7 +42,16 @@ DEFAULT_DOWNLOAD_PATH = Path("checkpoints")
 DEFAULT_MOSSFORMER_DIR = Path("MossFormer2_SE_48K")
 DEFAULT_ZIPENHANCER_DIR = Path("ZipEnhancer")
 DEFAULT_SPEAKER_DIR = Path("spkrec-ecapa-voxceleb")
-ALL_MODELS = ("asr", "aligner", "mossformer", "zipenhancer", "speaker")
+DEFAULT_DEMUCS_MODELS = ("htdemucs", "htdemucs_ft")
+ALL_MODELS = (
+    "asr",
+    "aligner",
+    "mossformer",
+    "zipenhancer",
+    "speaker",
+    "demucs",
+    "silero",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         choices=("all", "qwen3", *ALL_MODELS),
         default=["all"],
         help="Models to download. Default: all.",
+    )
+    parser.add_argument(
+        "--demucs-models",
+        nargs="+",
+        default=list(DEFAULT_DEMUCS_MODELS),
+        help="Demucs model names to prefetch when --models includes demucs. Default: htdemucs htdemucs_ft.",
     )
     parser.add_argument(
         "--provider",
@@ -232,6 +249,37 @@ def download_with_hf(model_id: str, destination: Path) -> None:
     snapshot_download(repo_id=model_id, local_dir=str(destination))
 
 
+def download_demucs_models(model_names: list[str], force: bool) -> None:
+    try:
+        from demucs.pretrained import get_model
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "Missing Python dependency: demucs\n"
+            f"Install dependencies with: {sys.executable} -m pip install -r requirements.txt"
+        ) from exc
+
+    for model_name in model_names:
+        print(f"Downloading Demucs model: {model_name}")
+        if force:
+            print("Note: Demucs manages its own cache; force does not clear existing cached files.")
+        get_model(model_name)
+
+
+def download_silero_vad(force: bool) -> None:
+    try:
+        from silero_vad import load_silero_vad
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "Missing Python dependency: silero-vad\n"
+            f"Install dependencies with: {sys.executable} -m pip install -r requirements.txt"
+        ) from exc
+
+    print("Downloading Silero VAD model")
+    if force:
+        print("Note: Silero VAD manages its own cache; force does not clear existing cached files.")
+    load_silero_vad()
+
+
 def download_model(
     model_id: str,
     provider: str,
@@ -320,10 +368,13 @@ def main() -> None:
             args.force,
             marker=speaker_dir / "hyperparams.yaml",
         )
+    if "demucs" in targets:
+        download_demucs_models(args.demucs_models, args.force)
+    if "silero" in targets:
+        download_silero_vad(args.force)
 
     print_webui_paths(asr_dir, aligner_dir, mossformer_dir, zipenhancer_dir, speaker_dir)
     print(f"\nDownload path: {download_path.resolve()}")
-    print("Note: Demucs and Silero VAD are downloaded/cached by their own Python packages when used.")
     print("Done.")
 
 

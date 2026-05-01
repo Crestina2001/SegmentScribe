@@ -473,7 +473,7 @@ def _build_volume_tab() -> None:
 def _build_models_tab() -> None:
     with gr.Tab("模型下载"):
         gr.Markdown("下载 WebUI 默认使用的模型 checkpoint。")
-        download_models = gr.CheckboxGroup(["all", "qwen3", "asr", "aligner", "mossformer", "zipenhancer", "speaker"], value=["all"], label="模型")
+        download_models = gr.CheckboxGroup(["all", "qwen3", "asr", "aligner", "mossformer", "zipenhancer", "speaker", "demucs", "silero"], value=["all"], label="模型")
         download_provider = gr.Dropdown(["modelscope", "huggingface"], value="modelscope", label="下载来源")
         download_path = gr.Textbox(label="检查点根目录", value=str(PROJECT_ROOT / "checkpoints"))
         download_asr_dir = gr.Textbox(label="ASR 目录名", value="Qwen3-ASR-1.7B")
