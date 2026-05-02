@@ -223,8 +223,10 @@ if is_true "${DO_SLICE:-true}"; then
       exit 2
     fi
     COMMAND+=(--llm-model "${LLM_MODEL}")
+    COMMAND+=(--rough-cut-strategy "${ROUGH_CUT_STRATEGY:-llm_pause_priority_silence_v2}")
     COMMAND+=(--llm-concurrency "${LLM_CONCURRENCY:-8}")
     COMMAND+=(--llm-max-rounds "${LLM_MAX_ROUNDS:-5}")
+    append_flag_if_true "${ENABLE_PUNCTUATION_CORRECTION:-false}" "--enable-punctuation-correction"
     if [[ -n "${PUNCT_LLM_MODEL:-}" ]]; then
       COMMAND+=(--punct-llm-model "${PUNCT_LLM_MODEL}")
     fi

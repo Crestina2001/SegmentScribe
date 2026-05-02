@@ -244,6 +244,7 @@ def slice_command(
             max_seg_sec,
             language,
             vad_backend,
+            punctuation,
             overwrite,
             dry_run,
             llm_model,
@@ -385,6 +386,7 @@ def llm_slice_command(
     max_seg_sec: float,
     language: str,
     vad_backend: str,
+    punctuation: bool,
     overwrite: bool,
     dry_run: bool,
     llm_model: str,
@@ -429,6 +431,8 @@ def llm_slice_command(
         command.extend(["--punct-llm-model", punct_llm_model.strip()])
     if rough_llm_model.strip():
         command.extend(["--rough-llm-model", rough_llm_model.strip()])
+    if punctuation:
+        command.append("--enable-punctuation-correction")
     if llm_provider.strip():
         command.extend(["--llm-provider", llm_provider.strip()])
     if env_path.strip():

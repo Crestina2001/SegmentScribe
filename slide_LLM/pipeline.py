@@ -39,11 +39,13 @@ from slicing_utils.prepass import (
     prepare_full_prepass_plan,
 )
 from slicing_utils.rough_cut import Phase3Result
+from slicing_utils.rough_cut import run_rough_cut_phase as run_deterministic_rough_cut_phase
 from slide_rule.pipeline import iter_audio_files, load_audio_mono
 from slide_rule.thin_cut import run_thin_cut_phase
 
 from .config import LLMWorkflowConfig
 from .punctuation import LLMPunctuationResult, run_llm_punctuation_phase
+from .text_rules import token_to_text_positions
 from .rough_cut import run_llm_rough_cut_phase
 
 
@@ -391,12 +393,17 @@ class SlideLLMPipeline:
 
         try:
             phase_started = time.perf_counter()
-            phase2: LLMPunctuationResult = await run_llm_punctuation_phase(
-                prepass,
-                llm_client=self.llm_client,
-                model=cfg.punctuation_model,
-                provider=cfg.llm_provider,
-            )
+            if cfg.enable_punctuation_correction:
+                phase2: LLMPunctuationResult = await run_llm_punctuation_phase(
+                    prepass,
+                    llm_client=self.llm_client,
+                    model=cfg.punctuation_model,
+                    provider=cfg.llm_provider,
+                )
+                punct_mode = "llm"
+            else:
+                phase2 = _identity_punctuation_result(prepass)
+                punct_mode = "disabled"
         except Exception as exc:
             result.status = "punctuation_error"
             result.error = f"{exc}\n{traceback.format_exc()}"
@@ -406,8 +413,8 @@ class SlideLLMPipeline:
         _write_json(
             src_dirs.traces_dir / "punctuation.json",
             {
-                "mode": "llm",
-                "enabled": True,
+                "mode": punct_mode,
+                "enabled": cfg.enable_punctuation_correction,
                 "edit_count": len(phase2.applied_windows),
                 "corrected_full_text": phase2.corrected_full_text,
                 "edits": [dataclasses.asdict(edit) for edit in phase2.applied_windows],
@@ -424,19 +431,34 @@ class SlideLLMPipeline:
 
         try:
             phase_started = time.perf_counter()
-            phase3: Phase3Result = await run_llm_rough_cut_phase(
-                audio=audio,
-                sample_rate=sr,
-                prepass=prepass,
-                corrected_full_text=phase2.corrected_full_text,
-                corrected_token_to_positions=phase2.corrected_token_to_positions,
-                min_seg_sec=cfg.min_seg_sec,
-                max_seg_sec=cfg.max_seg_sec,
-                llm_client=self.llm_client,
-                model=cfg.rough_model,
-                provider=cfg.llm_provider,
-                max_rounds=cfg.llm_max_rounds,
-            )
+            if cfg.rough_cut_strategy in {"llm_pause_priority_silence_v2", "llm_tool"}:
+                phase3: Phase3Result = await run_llm_rough_cut_phase(
+                    audio=audio,
+                    sample_rate=sr,
+                    prepass=prepass,
+                    corrected_full_text=phase2.corrected_full_text,
+                    corrected_token_to_positions=phase2.corrected_token_to_positions,
+                    min_seg_sec=cfg.min_seg_sec,
+                    max_seg_sec=cfg.max_seg_sec,
+                    llm_client=self.llm_client,
+                    model=cfg.rough_model,
+                    provider=cfg.llm_provider,
+                    max_rounds=cfg.llm_max_rounds,
+                    strategy=cfg.rough_cut_strategy,
+                )
+                rough_mode = "llm"
+            else:
+                phase3 = await run_deterministic_rough_cut_phase(
+                    audio=audio,
+                    sample_rate=sr,
+                    prepass=prepass,
+                    corrected_full_text=phase2.corrected_full_text,
+                    corrected_token_to_positions=phase2.corrected_token_to_positions,
+                    min_seg_sec=cfg.min_seg_sec,
+                    max_seg_sec=cfg.max_seg_sec,
+                    strategy=cfg.rough_cut_strategy,
+                )
+                rough_mode = "deterministic"
         except Exception as exc:
             result.status = "rough_cut_error"
             result.error = f"{exc}\n{traceback.format_exc()}"
@@ -447,7 +469,8 @@ class SlideLLMPipeline:
         _write_json(
             src_dirs.traces_dir / "rough_cut.json",
             {
-                "mode": "llm",
+                "mode": rough_mode,
+                "strategy": cfg.rough_cut_strategy,
                 "segment_count": len(phase3.segments),
                 "segments": [dataclasses.asdict(segment) for segment in phase3.segments],
                 "blocks": [dataclasses.asdict(trace) for trace in phase3.block_traces],
@@ -577,6 +600,7 @@ class SlideLLMPipeline:
         result.phase_counts = {
             "warnings": len(prepass.warnings),
             "llm_punctuation_edits": len(phase2.applied_windows),
+            "llm_punctuation_enabled": int(cfg.enable_punctuation_correction),
             "rough_blocks": len(phase3.block_traces),
             "rough_segments": len(phase3.segments),
             "refined_segments": len(phase4.refined),
@@ -638,6 +662,8 @@ class SlideLLMPipeline:
                 "llm_model": cfg.llm_model,
                 "punct_llm_model": cfg.punctuation_model,
                 "rough_llm_model": cfg.rough_model,
+                "enable_punctuation_correction": cfg.enable_punctuation_correction,
+                "rough_cut_strategy": cfg.rough_cut_strategy,
                 "llm_provider": cfg.llm_provider,
                 "llm_max_rounds": cfg.llm_max_rounds,
                 "model_path": cfg.model_path,
@@ -681,6 +707,14 @@ def _raise_for_duplicate_stems(source_files: Sequence[Path]) -> None:
         for stem, paths in sorted(duplicates.items())
     )
     raise SystemExit(f"Duplicate source filename stems would collide in output directories: {details}")
+
+
+def _identity_punctuation_result(prepass: FullPrepass) -> LLMPunctuationResult:
+    full_text = prepass.full_text or ""
+    return LLMPunctuationResult(
+        corrected_full_text=full_text,
+        corrected_token_to_positions=token_to_text_positions(full_text, prepass.global_chars),
+    )
 
 
 def _json_default(value: Any) -> Any:

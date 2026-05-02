@@ -15,7 +15,15 @@ from slicing_utils.prepass import FullPrepass, compact_pause_stats, pause_ms_aft
 from slicing_utils.rough_cut import (
     BlockCallTrace,
     Phase3Result,
+    RoughBoundary,
     RoughSegment,
+    _extract_punctuation_boundaries,
+    _priority_leftover_spans,
+    _priority_span_to_cut,
+    _priority_span_to_segment,
+    _solve_priority_regions,
+    _subtract_priority_spans,
+    _PriorityRegion,
     _segment_end_sec,
     _segment_start_sec,
 )
@@ -34,6 +42,18 @@ from .text_rules import is_punct_or_space
 TRIM_TOP_DB = 60
 TRIM_PADDING_SEC = 0.1
 MAX_EXTENSION_SENTENCES = 2
+PAUSE_CLASSIFICATION_GROUP_SIZE = 5
+PAUSE_CLASSIFICATION_PADDING = 1
+PAUSE_CLASSIFICATION_RETRY_LIMIT = 2
+PAUSE_LABELS = frozenset({"good", "ok", "bad"})
+
+PAUSE_CLASSIFICATION_SYSTEM_PROMPT = (
+    "You classify whether each visible punctuation boundary is a natural audio cut point. "
+    "The bracket marker before a text span, like [1], refers to the punctuation at the end of that marked span. "
+    "Return labels using the submit_pause_labels tool only. "
+    "Use good when the punctuation and semantic pause strongly agree, ok when usable but not ideal, "
+    "and bad when cutting there would sound abrupt or semantically wrong."
+)
 
 
 @dataclass(frozen=True)
@@ -84,6 +104,12 @@ class CutChoice:
     end_idx: int
 
 
+@dataclass(frozen=True)
+class PauseClassificationResult:
+    labels_by_candidate_id: dict[int, str]
+    group_traces: list[dict[str, Any]]
+
+
 async def run_llm_rough_cut_phase(
     *,
     audio: np.ndarray,
@@ -97,7 +123,24 @@ async def run_llm_rough_cut_phase(
     model: str,
     provider: ProviderName | None = None,
     max_rounds: int = 5,
+    strategy: str = "llm_pause_priority_silence_v2",
 ) -> Phase3Result:
+    if strategy == "llm_pause_priority_silence_v2":
+        return await run_llm_pause_priority_silence_v2_phase(
+            audio=audio,
+            sample_rate=sample_rate,
+            prepass=prepass,
+            corrected_full_text=corrected_full_text,
+            corrected_token_to_positions=corrected_token_to_positions,
+            min_seg_sec=min_seg_sec,
+            max_seg_sec=max_seg_sec,
+            llm_client=llm_client,
+            model=model,
+            provider=provider,
+        )
+    if strategy != "llm_tool":
+        raise ValueError(f"unknown LLM rough cut strategy: {strategy}")
+
     result = Phase3Result()
     chars = prepass.global_chars
     if not chars:
@@ -152,6 +195,484 @@ async def run_llm_rough_cut_phase(
         start_idx = next_start
         block_index += 1
     return result
+
+
+async def run_llm_pause_priority_silence_v2_phase(
+    *,
+    audio: np.ndarray,
+    sample_rate: int,
+    prepass: FullPrepass,
+    corrected_full_text: str,
+    corrected_token_to_positions: dict[int, list[int]],
+    min_seg_sec: float,
+    max_seg_sec: float,
+    llm_client: UnifiedClient,
+    model: str,
+    provider: ProviderName | None = None,
+) -> Phase3Result:
+    result = Phase3Result()
+    chars = prepass.global_chars
+    if not chars:
+        return result
+
+    boundaries = _extract_punctuation_boundaries(
+        corrected_full_text,
+        corrected_token_to_positions,
+        chars,
+        prepass,
+    )
+    classification = await _classify_pause_boundaries(
+        llm_client=llm_client,
+        model=model,
+        provider=provider,
+        prepass=prepass,
+        corrected_full_text=corrected_full_text,
+        corrected_token_to_positions=corrected_token_to_positions,
+        boundaries=boundaries,
+    )
+    segments, chosen_cuts, error, planner_meta = _plan_segments_llm_pause_priority_silence_v2(
+        audio=audio,
+        sample_rate=sample_rate,
+        prepass=prepass,
+        chars=chars,
+        boundaries=boundaries,
+        labels_by_candidate_id=classification.labels_by_candidate_id,
+        min_seg_sec=min_seg_sec,
+        max_seg_sec=max_seg_sec,
+    )
+    result.segments.extend(segments)
+    response_cuts = [
+        _boundary_trace(boundary, prepass, classification.labels_by_candidate_id.get(boundary.candidate_id, "final"))
+        for boundary in boundaries
+    ]
+    result.block_traces.append(
+        BlockCallTrace(
+            block_index=1,
+            char_start_idx=0,
+            char_end_idx=len(chars) - 1,
+            block_start_sec=float(chars[0].start_sec),
+            block_end_sec=float(chars[-1].end_sec),
+            prompt_summary={
+                "planner": "llm_pause_priority_silence_v2",
+                "strategy": "llm_pause_priority_silence_v2",
+                "classification_mode": "llm_pause_labels",
+                "classifier_group_size": PAUSE_CLASSIFICATION_GROUP_SIZE,
+                "classifier_padding": PAUSE_CLASSIFICATION_PADDING,
+                "candidate_boundary_count": len(boundaries),
+                "classified_boundary_count": len(classification.labels_by_candidate_id),
+                "good_boundary_count": sum(1 for label in classification.labels_by_candidate_id.values() if label == "good"),
+                "ok_boundary_count": sum(1 for label in classification.labels_by_candidate_id.values() if label == "ok"),
+                "bad_boundary_count": sum(1 for label in classification.labels_by_candidate_id.values() if label == "bad"),
+                "thresholds_ms": _llm_pause_thresholds(prepass),
+                "text_preview": _extract_span_text(
+                    corrected_full_text,
+                    corrected_token_to_positions,
+                    0,
+                    len(chars) - 1,
+                )[:160],
+                "trim_top_db": TRIM_TOP_DB,
+                **planner_meta,
+            },
+            response_cuts=response_cuts,
+            applied_cuts=chosen_cuts,
+            carry_over_from_idx=None,
+            error=error,
+        )
+    )
+    if classification.group_traces:
+        result.block_traces[0].prompt_summary["classifier_traces"] = classification.group_traces
+    return result
+
+
+async def _classify_pause_boundaries(
+    *,
+    llm_client: UnifiedClient,
+    model: str,
+    provider: ProviderName | None,
+    prepass: FullPrepass,
+    corrected_full_text: str,
+    corrected_token_to_positions: dict[int, list[int]],
+    boundaries: Sequence[RoughBoundary],
+) -> PauseClassificationResult:
+    punctuation_boundaries = [boundary for boundary in boundaries if boundary.boundary_kind != "final"]
+    if not punctuation_boundaries:
+        return PauseClassificationResult(labels_by_candidate_id={}, group_traces=[])
+
+    labels_by_candidate_id: dict[int, str] = {}
+    traces: list[dict[str, Any]] = []
+    for group_index, target_start in enumerate(
+        range(0, len(punctuation_boundaries), PAUSE_CLASSIFICATION_GROUP_SIZE),
+        start=1,
+    ):
+        target_boundaries = punctuation_boundaries[target_start : target_start + PAUSE_CLASSIFICATION_GROUP_SIZE]
+        prompt, marker_to_boundary = _build_pause_classification_prompt(
+            corrected_full_text=corrected_full_text,
+            corrected_token_to_positions=corrected_token_to_positions,
+            prepass=prepass,
+            all_boundaries=boundaries,
+            target_boundaries=target_boundaries,
+            punctuation_start_index=target_start,
+        )
+        expected_markers = set(marker_to_boundary)
+        memory_manager = MemoryManager(system_prompt=PAUSE_CLASSIFICATION_SYSTEM_PROMPT, stateful=True)
+        attempts: list[dict[str, Any]] = []
+        validated: dict[int, str] | None = None
+        validation_error = ""
+        for attempt in range(1, PAUSE_CLASSIFICATION_RETRY_LIMIT + 1):
+            payload = dict(prompt)
+            if validation_error:
+                payload["previous_validation_error"] = validation_error
+                payload["retry_instruction"] = "Resubmit labels for all and only the visible marker IDs."
+            response = await llm_client.send_prompt(
+                memory_manager,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                provider=provider,
+                model=model,
+                temperature=0,
+                tools=[_submit_pause_labels_tool()],
+                tool_choice="required",
+                trace_name="slide_LLM.rough_cut.pause_classification",
+                metadata={"phase": "rough_cut_pause_classification", "group_index": group_index, "attempt": attempt},
+            )
+            raw_labels = _parse_pause_labels(response)
+            validated, validation_error = _validate_pause_labels(raw_labels, expected_markers)
+            _append_tool_result_messages(
+                memory_manager,
+                response,
+                {
+                    "tool": "submit_pause_labels",
+                    "valid": validated is not None,
+                    "labels": validated or raw_labels,
+                    "validation_error": validation_error or None,
+                },
+            )
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "raw_labels": raw_labels,
+                    "validation_error": validation_error or None,
+                }
+            )
+            if validated is not None:
+                break
+        if validated is None:
+            validated = {marker_id: "ok" for marker_id in sorted(expected_markers)}
+            attempts.append(
+                {
+                    "attempt": "fallback",
+                    "raw_labels": validated,
+                    "validation_error": validation_error or "classifier did not return a valid label set",
+                }
+            )
+        for marker_id, label in validated.items():
+            labels_by_candidate_id[marker_to_boundary[marker_id].candidate_id] = label
+        traces.append(
+            {
+                "group_index": group_index,
+                "prompt": prompt,
+                "target_marker_map": {
+                    str(marker_id): {
+                        "candidate_id": boundary.candidate_id,
+                        "token_idx": boundary.token_idx,
+                        "boundary_text": boundary.boundary_text,
+                        "pause_ms": boundary.pause_ms,
+                    }
+                    for marker_id, boundary in marker_to_boundary.items()
+                },
+                "validated_labels": validated,
+                "attempts": attempts,
+            }
+        )
+    return PauseClassificationResult(labels_by_candidate_id=labels_by_candidate_id, group_traces=traces)
+
+
+def _build_pause_classification_prompt(
+    *,
+    corrected_full_text: str,
+    corrected_token_to_positions: dict[int, list[int]],
+    prepass: FullPrepass,
+    all_boundaries: Sequence[RoughBoundary],
+    target_boundaries: Sequence[RoughBoundary],
+    punctuation_start_index: int,
+) -> tuple[dict[str, Any], dict[int, RoughBoundary]]:
+    punctuation_boundaries = [boundary for boundary in all_boundaries if boundary.boundary_kind != "final"]
+    target_end_index = punctuation_start_index + len(target_boundaries) - 1
+    context_start = max(0, punctuation_start_index - PAUSE_CLASSIFICATION_PADDING)
+    context_end = min(len(punctuation_boundaries) - 1, target_end_index + PAUSE_CLASSIFICATION_PADDING)
+    context_boundaries = punctuation_boundaries[context_start : context_end + 1]
+    initial_token_idx = punctuation_boundaries[context_start - 1].token_idx + 1 if context_start > 0 else 0
+    marker_to_boundary = {marker_id: boundary for marker_id, boundary in enumerate(target_boundaries, start=1)}
+    boundary_to_marker = {boundary.candidate_id: marker_id for marker_id, boundary in marker_to_boundary.items()}
+    marked_text = _marked_pause_classification_text(
+        corrected_full_text=corrected_full_text,
+        corrected_token_to_positions=corrected_token_to_positions,
+        context_boundaries=context_boundaries,
+        boundary_to_marker=boundary_to_marker,
+        initial_token_idx=initial_token_idx,
+    )
+    return (
+        {
+            "task": "Classify the semantic/audio cut quality around each visible punctuation marker.",
+            "text": marked_text,
+            "marker_rule": (
+                "A marker such as [1] appears before the text span whose ending punctuation is being classified. "
+                "Padding context has no marker and must not receive a label."
+            ),
+            "labels": {
+                "good": "Natural, semantically complete, and suitable as a cut if pause thresholds allow it.",
+                "ok": "Usable but weaker than good; only cut when pause timing is strong enough.",
+                "bad": "Abrupt, semantically awkward, or should be avoided as a cut.",
+            },
+            "target_markers": sorted(marker_to_boundary),
+            "pause_stats_ms": _rough_cut_pause_stats(prepass),
+            "boundary_pauses_ms": {
+                str(marker_id): marker_to_boundary[marker_id].pause_ms
+                for marker_id in sorted(marker_to_boundary)
+            },
+            "output_rule": "Call submit_pause_labels with one label for every target marker and no padding markers.",
+        },
+        marker_to_boundary,
+    )
+
+
+def _marked_pause_classification_text(
+    *,
+    corrected_full_text: str,
+    corrected_token_to_positions: dict[int, list[int]],
+    context_boundaries: Sequence[RoughBoundary],
+    boundary_to_marker: dict[int, int],
+    initial_token_idx: int,
+) -> str:
+    pieces: list[str] = []
+    previous_token_idx = initial_token_idx
+    for boundary in context_boundaries:
+        start_idx = previous_token_idx
+        end_idx = boundary.token_idx
+        if start_idx <= end_idx:
+            piece = _extract_span_text(
+                corrected_full_text,
+                corrected_token_to_positions,
+                start_idx,
+                end_idx,
+            )
+            marker = boundary_to_marker.get(boundary.candidate_id)
+            if marker is not None:
+                piece = f"[{marker}]" + piece
+            pieces.append(piece)
+        previous_token_idx = boundary.token_idx + 1
+    return "".join(pieces)
+
+
+def _submit_pause_labels_tool() -> ToolDefinition:
+    return ToolDefinition(
+        name="submit_pause_labels",
+        description="Submit semantic/audio cut quality labels for visible punctuation markers.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "labels": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "idx": {"type": "integer", "description": "Visible marker ID, e.g. 1 for [1]."},
+                            "label": {"type": "string", "enum": ["good", "ok", "bad"]},
+                        },
+                        "required": ["idx", "label"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["labels"],
+            "additionalProperties": False,
+        },
+    )
+
+
+def _parse_pause_labels(response: Any) -> list[dict[str, Any]]:
+    for call in getattr(response, "tool_calls", []) or []:
+        if call.name == "submit_pause_labels":
+            labels = call.arguments.get("labels")
+            return labels if isinstance(labels, list) else []
+    return []
+
+
+def _validate_pause_labels(
+    raw_labels: Sequence[Any],
+    expected_markers: set[int],
+) -> tuple[dict[int, str] | None, str]:
+    parsed: dict[int, str] = {}
+    for item in raw_labels:
+        if not isinstance(item, dict):
+            return None, "each label item must be an object"
+        marker_id = item.get("idx")
+        label = item.get("label")
+        if not isinstance(marker_id, int) or isinstance(marker_id, bool):
+            return None, "each label item must contain integer idx"
+        if marker_id in parsed:
+            return None, f"duplicate marker idx: {marker_id}"
+        if marker_id not in expected_markers:
+            return None, f"unexpected marker idx: {marker_id}; expected {sorted(expected_markers)}"
+        if not isinstance(label, str) or label not in PAUSE_LABELS:
+            return None, f"invalid label for marker {marker_id}: {label!r}"
+        parsed[marker_id] = label
+    missing = expected_markers - set(parsed)
+    if missing:
+        return None, f"missing marker labels: {sorted(missing)}"
+    return parsed, ""
+
+
+def _llm_pause_thresholds(prepass: FullPrepass) -> dict[str, float]:
+    return {
+        "strong_p80_ms": float(prepass.strong.p80_ms),
+        "weak_p20_ms": float(prepass.weak.p20_ms),
+        "weak_p50_ms": float(prepass.weak.p50_ms),
+    }
+
+
+def _llm_pause_step(boundary: RoughBoundary, prepass: FullPrepass, label: str) -> str:
+    if boundary.boundary_kind == "final":
+        return "must_cut"
+    pause_ms = float(boundary.pause_ms)
+    if pause_ms >= float(prepass.strong.p80_ms) and label == "good":
+        return "must_cut"
+    if pause_ms >= float(prepass.weak.p50_ms) and label == "good":
+        return "step2_good_median"
+    if (pause_ms > float(prepass.weak.p20_ms) and label == "good") or (
+        pause_ms >= float(prepass.weak.p50_ms) and label == "ok"
+    ):
+        return "step3_good_or_ok"
+    if pause_ms > float(prepass.weak.p20_ms) and label != "bad":
+        return "step4_not_bad"
+    return "not_candidate"
+
+
+def _plan_segments_llm_pause_priority_silence_v2(
+    *,
+    audio: np.ndarray,
+    sample_rate: int,
+    prepass: FullPrepass,
+    chars: Sequence[Any],
+    boundaries: Sequence[RoughBoundary],
+    labels_by_candidate_id: dict[int, str],
+    min_seg_sec: float,
+    max_seg_sec: float,
+) -> tuple[list[RoughSegment], list[dict[str, Any]], Optional[str], dict[str, Any]]:
+    if not boundaries:
+        return [], [], "no candidate punctuation boundaries found", {}
+
+    trim_cache: dict[tuple[int, int], float] = {}
+    must_boundaries = [
+        boundary
+        for boundary in boundaries
+        if _llm_pause_step(boundary, prepass, labels_by_candidate_id.get(boundary.candidate_id, "bad")) == "must_cut"
+    ]
+    if not must_boundaries or must_boundaries[-1].boundary_kind != "final":
+        return [], [], "llm_pause_priority_silence_v2 found no final must_cut boundary", {}
+
+    regions: list[_PriorityRegion] = []
+    region_start = 0
+    for region_end in must_boundaries:
+        if region_start <= region_end.token_idx:
+            regions.append(_PriorityRegion(start_token_idx=region_start, end_boundary=region_end))
+        region_start = region_end.token_idx + 1
+
+    all_solved: list[Any] = []
+    current_regions = regions
+    phase_specs = [
+        ("step2_good_median", "segments_before_silence"),
+        ("step3_good_or_ok", "silence_before_segments"),
+        ("step4_not_bad", "silence_before_segments"),
+    ]
+    for phase, split_priority in phase_specs:
+        candidates = [
+            boundary
+            for boundary in boundaries
+            if boundary.boundary_kind != "final"
+            and _llm_pause_step(boundary, prepass, labels_by_candidate_id.get(boundary.candidate_id, "bad")) == phase
+        ]
+        solved = _solve_priority_regions(
+            audio=audio,
+            sample_rate=sample_rate,
+            chars=chars,
+            regions=current_regions,
+            candidate_boundaries=candidates,
+            phase=phase,
+            split_priority=split_priority,
+            min_seg_sec=min_seg_sec,
+            max_seg_sec=max_seg_sec,
+            trim_cache=trim_cache,
+            require_internal_candidate=(phase == "step2_good_median"),
+        )
+        all_solved.extend(solved)
+        current_regions = _subtract_priority_spans(current_regions, solved, chars)
+
+    all_spans: list[Any] = []
+    solved_spans = sorted(all_solved, key=lambda span: (span.start_token_idx, span.end_boundary.token_idx))
+    for region in regions:
+        region_spans = [
+            span
+            for span in solved_spans
+            if region.start_token_idx <= span.start_token_idx <= span.end_boundary.token_idx <= region.end_boundary.token_idx
+        ]
+        all_spans.extend(
+            _priority_leftover_spans(
+                audio=audio,
+                sample_rate=sample_rate,
+                chars=chars,
+                region_start_token_idx=region.start_token_idx,
+                region_end_boundary=region.end_boundary,
+                chosen_spans=region_spans,
+                min_seg_sec=min_seg_sec,
+                max_seg_sec=max_seg_sec,
+                trim_cache=trim_cache,
+            )
+        )
+
+    strategy = "llm_pause_priority_silence_v2"
+    segments = [_priority_span_to_segment(span, chars, strategy=strategy) for span in all_spans]
+    chosen_cuts = [
+        _priority_span_to_cut(span, strategy=strategy)
+        | {
+            "llm_pause_label": labels_by_candidate_id.get(span.end_boundary.candidate_id, "final"),
+            "llm_pause_step": _llm_pause_step(
+                span.end_boundary,
+                prepass,
+                labels_by_candidate_id.get(span.end_boundary.candidate_id, "bad"),
+            ),
+            "thresholds_ms": _llm_pause_thresholds(prepass),
+        }
+        for span in all_spans
+    ]
+    meta = {
+        "llm_pause_must_cut_boundary_count": len(must_boundaries),
+        "llm_pause_step2_candidate_count": sum(
+            1 for b in boundaries if _llm_pause_step(b, prepass, labels_by_candidate_id.get(b.candidate_id, "bad")) == "step2_good_median"
+        ),
+        "llm_pause_step3_candidate_count": sum(
+            1 for b in boundaries if _llm_pause_step(b, prepass, labels_by_candidate_id.get(b.candidate_id, "bad")) == "step3_good_or_ok"
+        ),
+        "llm_pause_step4_candidate_count": sum(
+            1 for b in boundaries if _llm_pause_step(b, prepass, labels_by_candidate_id.get(b.candidate_id, "bad")) == "step4_not_bad"
+        ),
+    }
+    return segments, chosen_cuts, None, meta
+
+
+def _boundary_trace(boundary: RoughBoundary, prepass: FullPrepass, label: str) -> dict[str, Any]:
+    return {
+        "candidate_id": int(boundary.candidate_id),
+        "cut_char_idx": int(boundary.token_idx),
+        "boundary_kind": boundary.boundary_kind,
+        "boundary_quality": boundary.quality,
+        "cut_policy": boundary.cut_policy,
+        "boundary_text": boundary.boundary_text,
+        "pause_ms": boundary.pause_ms,
+        "llm_pause_label": label,
+        "strategy_cut_policy": _llm_pause_step(boundary, prepass, label if label in PAUSE_LABELS else "bad"),
+        "thresholds_ms": _llm_pause_thresholds(prepass),
+        "reason": boundary.reason,
+    }
 
 
 async def _plan_one_window(

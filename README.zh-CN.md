@@ -300,7 +300,8 @@ python -m slide_rule \
 ## LLM 辅助切分：slide_LLM
 
 `slide_LLM` 复用 `slide_rule` 的 ASR/alignment 预处理、静音感知细切分、
-输出目录结构、manifest、JSONL 和 trace，但用 LLM 完成标点修正和粗切分决策。
+输出目录结构、manifest、JSONL 和 trace。默认不做标点修正，并由 LLM 将标点停顿分类为
+`good` / `ok` / `bad`，再交给适配版 `priority_silence_v2` 粗切分策略。
 运行前先在 `.env` 中配置 LLM provider 的 key/base URL，参考 `.env.example`。
 
 ```cmd
@@ -325,9 +326,12 @@ python -m slide_LLM \
 
 常用 LLM 参数：
 
-- `--llm-model`: 必填，作为标点和粗切分两个 LLM 阶段的默认模型。
-- `--punct-llm-model`: 可选，只覆盖标点修正阶段。
+- `--llm-model`: 必填，作为 LLM 阶段的默认模型。
+- `--enable-punctuation-correction`: 启用 LLM 标点修正；默认关闭。
+- `--punct-llm-model`: 可选，启用标点修正时只覆盖标点修正阶段。
 - `--rough-llm-model`: 可选，只覆盖粗切分阶段。
+- `--rough-cut-strategy`: 粗切分策略，默认 `llm_pause_priority_silence_v2`；
+  `llm_tool` 可使用旧的 tool-calling 粗切分流程。
 - `--llm-provider`: 可选；省略时 gateway 会尝试从模型名推断 provider。
 - `--env-path`: 可选，指定包含 provider key 的 `.env` 文件。
 - `--llm-max-rounds`: 粗切分长度错误后的最大修复轮数，默认 `5`。

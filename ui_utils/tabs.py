@@ -51,7 +51,7 @@ def _shared_slice_controls(prefix: str, *, include_device: bool = True, include_
         vad = gr.Dropdown(["auto", "silero", "librosa"], value="auto", label="VAD backend")
     with gr.Row():
         language = gr.Textbox(label="Language hint", value="")
-        punctuation = gr.Checkbox(label="Rule punctuation correction", value=False)
+        punctuation = gr.Checkbox(label="Punctuation correction", value=False)
         overwrite = gr.Checkbox(label="Overwrite", value=True) if include_run_flags else None
         dry = gr.Checkbox(label="Dry run", value=False) if include_run_flags else None
     with gr.Accordion("LLM slicing settings", open=False):

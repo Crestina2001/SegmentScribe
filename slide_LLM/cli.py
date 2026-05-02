@@ -17,12 +17,20 @@ from .config import LLMWorkflowConfig
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 PROVIDERS: tuple[ProviderName, ...] = ("openai", "minimax", "anthropic", "gemini", "deepseek")
+ROUGH_CUT_STRATEGIES = (
+    "llm_pause_priority_silence_v2",
+    "llm_tool",
+    "legacy_dp",
+    "priority_silence_v1",
+    "priority_silence_v2",
+    "dp_strategy_2",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m slide_LLM",
-        description="LLM-driven slide slicing: pre-pass, LLM punctuation, LLM rough cut, thin cut, write.",
+        description="LLM-driven slide slicing: pre-pass, optional LLM punctuation, LLM rough cut, thin cut, write.",
     )
     parser.add_argument("--input", required=True)
     parser.add_argument("--output-dir", required=True)
@@ -34,6 +42,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-provider", choices=PROVIDERS, default=None)
     parser.add_argument("--env-path", default=None)
     parser.add_argument("--llm-max-rounds", type=int, default=5)
+    parser.add_argument(
+        "--rough-cut-strategy",
+        choices=ROUGH_CUT_STRATEGIES,
+        default="llm_pause_priority_silence_v2",
+        help="Rough-cut planner strategy. Default: llm_pause_priority_silence_v2.",
+    )
+    parser.add_argument(
+        "--enable-punctuation-correction",
+        action="store_true",
+        help="Enable LLM punctuation correction. Disabled by default.",
+    )
     parser.add_argument("--asr-backend", default="transformers", choices=("transformers", "vllm"))
     parser.add_argument("--asr-backend-kwargs", default="{}")
     parser.add_argument("--forced-aligner-kwargs", default="{}")
@@ -104,6 +123,8 @@ def args_to_config(args: argparse.Namespace) -> LLMWorkflowConfig:
         llm_model=args.llm_model,
         punct_llm_model=args.punct_llm_model,
         rough_llm_model=args.rough_llm_model,
+        enable_punctuation_correction=args.enable_punctuation_correction,
+        rough_cut_strategy=args.rough_cut_strategy,
         llm_provider=args.llm_provider,
         env_path=args.env_path,
         llm_max_rounds=args.llm_max_rounds,
