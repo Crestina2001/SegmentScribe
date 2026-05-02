@@ -47,12 +47,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rms-silence-hop-ms", type=float, default=5.0)
     parser.add_argument("--rms-silence-percentile", type=float, default=25.0)
     parser.add_argument("--rms-silence-threshold-multiplier", type=float, default=1.8)
-    parser.add_argument("--rms-min-silence-ms", type=float, default=80.0)
+    parser.add_argument(
+        "--rms-min-silence-ms",
+        type=float,
+        default=80.0,
+        help="Deprecated compatibility option; RMS prepass now cuts at the best silent position without a minimum run length.",
+    )
     parser.add_argument("--vad-backend", default="auto", choices=("auto", "silero", "librosa"))
     parser.add_argument("--vad-threshold", type=float, default=0.5)
     parser.add_argument("--vad-min-speech-ms", type=int, default=250)
     parser.add_argument("--vad-min-silence-ms", type=int, default=300)
     parser.add_argument("--vad-speech-pad-ms", type=int, default=200)
+    parser.add_argument(
+        "--rough-cut-strategy",
+        default="priority_silence_v2",
+        choices=("legacy_dp", "priority_silence_v1", "priority_silence_v2", "dp_strategy_2"),
+        help="Rough-cut planner strategy. Default: priority_silence_v2.",
+    )
     parser.add_argument(
         "--enable-punctuation-correction",
         action="store_true",
@@ -123,6 +134,7 @@ def args_to_config(args: argparse.Namespace):
         vad_min_silence_ms=args.vad_min_silence_ms,
         vad_speech_pad_ms=args.vad_speech_pad_ms,
         enable_punctuation_correction=args.enable_punctuation_correction,
+        rough_cut_strategy=args.rough_cut_strategy,
     )
 
 

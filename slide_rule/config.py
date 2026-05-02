@@ -46,3 +46,4 @@ class RuleWorkflowConfig:
     vad_min_silence_ms: int = 300
     vad_speech_pad_ms: int = 200
     enable_punctuation_correction: bool = False
+    rough_cut_strategy: str = "priority_silence_v2"

@@ -12,3 +12,4 @@ webui_server*.log
 webui_runs/
 pipeline_runs/
 intention/
+configs/full_pipeline.local.env

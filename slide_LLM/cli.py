@@ -58,7 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rms-silence-hop-ms", type=float, default=5.0)
     parser.add_argument("--rms-silence-percentile", type=float, default=25.0)
     parser.add_argument("--rms-silence-threshold-multiplier", type=float, default=1.8)
-    parser.add_argument("--rms-min-silence-ms", type=float, default=80.0)
+    parser.add_argument(
+        "--rms-min-silence-ms",
+        type=float,
+        default=80.0,
+        help="Deprecated compatibility option; RMS prepass now cuts at the best silent position without a minimum run length.",
+    )
     parser.add_argument("--vad-backend", default="auto", choices=("auto", "silero", "librosa"))
     parser.add_argument("--vad-threshold", type=float, default=0.5)
     parser.add_argument("--vad-min-speech-ms", type=int, default=250)

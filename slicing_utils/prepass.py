@@ -237,27 +237,18 @@ def _choose_rms_silence_cut_sample(
         1e-6,
         float(centers[1] - centers[0]) if len(centers) > 1 else cfg.hop_ms / 1000.0,
     )
-    min_frames = max(1, int(np.ceil((cfg.min_silence_ms / 1000.0) / hop_sec)))
-
-    best: tuple[float, float, float, int, int] | None = None
+    best: tuple[float, float, float, int] | None = None
     target_mid = cursor_sec + (min_sec + max_sec) * 0.5
-    for start_i, end_i in _true_runs(silent):
-        if end_i - start_i + 1 < min_frames:
-            continue
-        silence_start = float(centers[start_i])
-        silence_end = float(centers[end_i])
-        silence_len = max(0.0, silence_end - silence_start)
-        mean_rms = float(np.mean(rms[start_i : end_i + 1]))
-        center = (silence_start + silence_end) * 0.5
-        candidate = (silence_len, -mean_rms, -abs(center - target_mid), start_i, end_i)
+    for frame_i in np.flatnonzero(silent):
+        center = float(centers[int(frame_i)])
+        candidate = (-float(rms[int(frame_i)]), -abs(center - target_mid), center, int(frame_i))
         if best is None or candidate > best:
             best = candidate
 
     if best is None:
         cut_sec = latest if cfg.fallback == "max" else cursor_sec + (latest - cursor_sec) * 0.5
     else:
-        _silence_len, _neg_rms, _target_distance, start_i, end_i = best
-        cut_sec = (float(centers[start_i]) + float(centers[end_i])) * 0.5
+        _neg_rms, _target_distance, cut_sec, _frame_i = best
 
     cut_sample = int(round(cut_sec * sample_rate))
     min_cut = min(total_samples, cursor_sample + int(round(min_sec * sample_rate)))

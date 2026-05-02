@@ -278,6 +278,7 @@ class SlideRulePipeline:
                 corrected_token_to_positions=phase2.corrected_token_to_positions,
                 min_seg_sec=cfg.min_seg_sec,
                 max_seg_sec=cfg.max_seg_sec,
+                strategy=cfg.rough_cut_strategy,
             )
         except Exception as exc:
             result.status = "rough_cut_error"
@@ -495,6 +496,7 @@ class SlideRulePipeline:
                 "max_source_seconds": cfg.max_source_seconds,
                 "overwrite": cfg.overwrite,
                 "dry_run": cfg.dry_run,
+                "rough_cut_strategy": cfg.rough_cut_strategy,
             },
             "generated_at_unix": int(time.time()),
         }

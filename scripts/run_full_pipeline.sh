@@ -215,6 +215,7 @@ if is_true "${DO_SLICE:-true}"; then
     COMMAND+=(--language "${LANGUAGE}")
   fi
   if [[ "${SLICE_MODULE}" == "slide_rule" ]]; then
+    COMMAND+=(--rough-cut-strategy "${ROUGH_CUT_STRATEGY:-priority_silence_v2}")
     append_flag_if_true "${ENABLE_PUNCTUATION_CORRECTION:-false}" "--enable-punctuation-correction"
   else
     if [[ -z "${LLM_MODEL:-}" ]]; then
