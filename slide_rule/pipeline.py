@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from slicing_utils.asr import AsrBackend
 from slicing_utils.filter_write import (
@@ -27,7 +28,15 @@ from slicing_utils.filter_write import (
     write_text_atomic,
     write_voxcpm_jsonl,
 )
-from slicing_utils.prepass import FullPrepass, RmsSilenceConfig, VadConfig, compute_full_prepass
+from slicing_utils.prepass import (
+    AsrChunkDraft,
+    FullPrepass,
+    RmsSilenceConfig,
+    VadConfig,
+    align_draft_chunk_windows,
+    assemble_full_prepass,
+    prepare_full_prepass_plan,
+)
 from slicing_utils.rough_cut import Phase3Result, run_rough_cut_phase
 
 from .config import AUDIO_EXTENSIONS, RuleWorkflowConfig
@@ -50,6 +59,126 @@ class SourceResult:
     outcomes: list[dict[str, Any]] = field(default_factory=list)
     phase_counts: dict[str, int] = field(default_factory=dict)
     error: Optional[str] = None
+
+
+@dataclass
+class _AsrChunkRequest:
+    audio: np.ndarray
+    sample_rate: int
+    span: tuple[int, int]
+    source_label: str
+    chunk_index: int
+    source_total_chunks: int
+    future: asyncio.Future[AsrChunkDraft]
+
+
+class AsrBatcher:
+    _BATCH_FILL_DELAY_SEC = 0.01
+
+    def __init__(self, asr_backend: AsrBackend, *, max_batch_size: int) -> None:
+        self._asr_backend = asr_backend
+        self._max_batch_size = max(1, int(max_batch_size))
+        self._queue: asyncio.Queue[_AsrChunkRequest | None] = asyncio.Queue()
+        self._worker: asyncio.Task[None] | None = None
+        self._progress = None
+
+    def start(self) -> None:
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._run())
+
+    async def close(self) -> None:
+        if self._worker is None:
+            return
+        await self._queue.put(None)
+        await self._worker
+        self._worker = None
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
+
+    async def transcribe_source(
+        self,
+        *,
+        source_label: str,
+        audio: np.ndarray,
+        sample_rate: int,
+        chunks: Sequence[tuple[int, int]],
+    ) -> list[AsrChunkDraft]:
+        if not chunks:
+            return []
+        loop = asyncio.get_running_loop()
+        requests: list[_AsrChunkRequest] = []
+        total_chunks = len(chunks)
+        self._ensure_progress(total_chunks)
+        for chunk_index, (start, end) in enumerate(chunks, start=1):
+            request = _AsrChunkRequest(
+                audio=np.ascontiguousarray(audio[start:end], dtype=np.float32),
+                sample_rate=sample_rate,
+                span=(start, end),
+                source_label=source_label,
+                chunk_index=chunk_index,
+                source_total_chunks=total_chunks,
+                future=loop.create_future(),
+            )
+            requests.append(request)
+            await self._queue.put(request)
+        return list(await asyncio.gather(*(request.future for request in requests)))
+
+    async def _run(self) -> None:
+        while True:
+            first = await self._queue.get()
+            if first is None:
+                return
+            batch = [first]
+            await asyncio.sleep(self._BATCH_FILL_DELAY_SEC)
+            while len(batch) < self._max_batch_size:
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is None:
+                    await self._queue.put(None)
+                    break
+                batch.append(item)
+            await self._process_batch(batch)
+
+    async def _process_batch(self, batch: Sequence[_AsrChunkRequest]) -> None:
+        windows = [(request.audio, request.sample_rate) for request in batch]
+        try:
+            transcripts = await asyncio.to_thread(self._asr_backend.transcribe_windows_asr_only, windows)
+        except Exception as exc:
+            logger.warning("Batched ASR failed for %d chunk(s): %s", len(batch), exc)
+            transcripts = []
+        drafts: list[AsrChunkDraft] = []
+        for index, request in enumerate(batch):
+            if index < len(transcripts):
+                tr = transcripts[index]
+                drafts.append(
+                    AsrChunkDraft(
+                        text=str(tr.text or ""),
+                        language=str(tr.language or ""),
+                        span=request.span,
+                    )
+                )
+            else:
+                drafts.append(AsrChunkDraft(text="", language="", span=request.span))
+        for request, result in zip(batch, drafts):
+            if not request.future.done():
+                request.future.set_result(result)
+        if self._progress is not None:
+            self._progress.update(len(batch))
+
+    def _ensure_progress(self, added_total: int) -> None:
+        if self._progress is None:
+            self._progress = tqdm(
+                total=0,
+                desc="Qwen3-ASR",
+                unit="win",
+                dynamic_ncols=True,
+                leave=False,
+            )
+        self._progress.total = int(self._progress.total or 0) + int(added_total)
+        self._progress.refresh()
 
 
 def iter_audio_files(input_path: Path, allowed_extensions: Sequence[str]) -> list[Path]:
@@ -97,6 +226,7 @@ class SlideRulePipeline:
             backend_kwargs=config.asr_backend_kwargs,
             forced_aligner_kwargs=config.forced_aligner_kwargs,
         )
+        self.asr_batcher = AsrBatcher(self.asr_backend, max_batch_size=config.asr_max_batch_size)
 
     async def run(self) -> dict[str, Any]:
         cfg = self.config
@@ -123,30 +253,43 @@ class SlideRulePipeline:
             raise SystemExit(f"No audio files found under {cfg.input_path}.")
 
         logger.info("Discovered %d source audio file(s)", len(source_files))
-        results: list[SourceResult] = []
-        for index, path in enumerate(source_files, start=1):
-            results.append(await self._process_source(path, index=index, total=len(source_files)))
-        kept_records = sort_records(record for result in results for record in result.kept_records)
-        write_manifest(cfg.output_dir, kept_records)
-        jsonl_path = write_voxcpm_jsonl(
-            cfg.output_dir,
-            voxcpm_jsonl_name(cfg.input_path),
-            kept_records,
-        )
-        summary = self._build_summary(source_files, kept_records, results)
-        summary["voxcpm_jsonl"] = str(jsonl_path)
-        write_summary(cfg.output_dir, summary)
-        logger.info(
-            "Finished slide_rule in %.2fs: sources=%d kept_segments=%d kept_audio_hours=%.4f "
-            "output_dir=%s jsonl=%s",
-            time.perf_counter() - workflow_started,
-            len(source_files),
-            len(kept_records),
-            summary["kept_audio_hours"],
-            cfg.output_dir,
-            jsonl_path,
-        )
-        return summary
+        try:
+            _raise_for_duplicate_stems(source_files)
+            self.asr_batcher.start()
+            tasks = [
+                asyncio.create_task(
+                    self._process_source_indexed(path, index=index, total=len(source_files))
+                )
+                for index, path in enumerate(source_files, start=1)
+            ]
+            indexed_results = await asyncio.gather(*tasks)
+            results = [result for _, result in sorted(indexed_results, key=lambda item: item[0])]
+            kept_records = sort_records(record for result in results for record in result.kept_records)
+            write_manifest(cfg.output_dir, kept_records)
+            jsonl_path = write_voxcpm_jsonl(
+                cfg.output_dir,
+                voxcpm_jsonl_name(cfg.input_path),
+                kept_records,
+            )
+            summary = self._build_summary(source_files, kept_records, results)
+            summary["voxcpm_jsonl"] = str(jsonl_path)
+            write_summary(cfg.output_dir, summary)
+            logger.info(
+                "Finished slide_rule in %.2fs: sources=%d kept_segments=%d kept_audio_hours=%.4f "
+                "output_dir=%s jsonl=%s",
+                time.perf_counter() - workflow_started,
+                len(source_files),
+                len(kept_records),
+                summary["kept_audio_hours"],
+                cfg.output_dir,
+                jsonl_path,
+            )
+            return summary
+        finally:
+            await self.asr_batcher.close()
+
+    async def _process_source_indexed(self, source_path: Path, *, index: int, total: int) -> tuple[int, SourceResult]:
+        return index, await self._process_source(source_path, index=index, total=total)
 
     async def _process_source(self, source_path: Path, *, index: int, total: int) -> SourceResult:
         cfg = self.config
@@ -206,17 +349,36 @@ class SlideRulePipeline:
 
         try:
             phase_started = time.perf_counter()
-            prepass: FullPrepass = await asyncio.to_thread(
-                compute_full_prepass,
+            plan = await asyncio.to_thread(
+                prepare_full_prepass_plan,
                 audio,
                 sr,
-                self.asr_backend,
                 chunk_sec=cfg.preprocess_chunk_sec,
                 chunk_mode=cfg.preprocess_chunk_mode,
                 rms_silence_cfg=rms_silence_cfg,
                 vad_cfg=vad_cfg,
-                max_inference_batch_size=cfg.asr_max_batch_size,
+            )
+            asr_drafts = await self.asr_batcher.transcribe_source(
                 source_label=str(source_path),
+                audio=audio,
+                sample_rate=sr,
+                chunks=plan.chunks,
+            )
+            windows = [
+                (np.ascontiguousarray(audio[start:end], dtype=np.float32), sr, (start, end))
+                for start, end in plan.chunks
+            ]
+            transcribed = await asyncio.to_thread(
+                align_draft_chunk_windows,
+                windows,
+                asr_drafts,
+                self.asr_backend,
+            )
+            prepass: FullPrepass = await asyncio.to_thread(
+                assemble_full_prepass,
+                audio,
+                sr,
+                transcribed,
             )
         except Exception as exc:
             result.status = "prepass_error"
@@ -505,6 +667,20 @@ class SlideRulePipeline:
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n")
+
+
+def _raise_for_duplicate_stems(source_files: Sequence[Path]) -> None:
+    paths_by_stem: dict[str, list[Path]] = {}
+    for path in source_files:
+        paths_by_stem.setdefault(path.stem, []).append(path)
+    duplicates = {stem: paths for stem, paths in paths_by_stem.items() if len(paths) > 1}
+    if not duplicates:
+        return
+    details = "; ".join(
+        f"{stem}: {', '.join(str(path) for path in paths)}"
+        for stem, paths in sorted(duplicates.items())
+    )
+    raise SystemExit(f"Duplicate source filename stems would collide in output directories: {details}")
 
 
 def _json_default(value: Any) -> Any:
