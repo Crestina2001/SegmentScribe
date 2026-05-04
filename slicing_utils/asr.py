@@ -38,7 +38,7 @@ def resolve_model_path(path: str, *, label: str = "model") -> str:
     """Return a local directory for ``path``.
 
     Resolution order:
-      1. If ``path`` expands to an existing directory, return that directory.
+      1. If ``path`` expands to an existing directory, return its absolute path.
       2. Otherwise, try ModelScope, then Hugging Face snapshot downloads and
          return the local cache directory. This lets users pass repo ids
          (e.g. ``Qwen/Qwen3-ASR-1.7B``) directly.
@@ -49,7 +49,7 @@ def resolve_model_path(path: str, *, label: str = "model") -> str:
 
     local = Path(os.path.expanduser(str(path)))
     if local.is_dir():
-        return str(local)
+        return str(local.resolve())
 
     errors: list[str] = []
     try:
