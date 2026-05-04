@@ -27,7 +27,14 @@ from slicing_utils.filter_write import (
     write_text_atomic,
     write_voxcpm_jsonl,
 )
-from slicing_utils.prepass import FullPrepass, RmsSilenceConfig, VadConfig, compute_full_prepass
+from slicing_utils.prepass import (
+    AsyncPrepassScheduler,
+    FullPrepass,
+    RmsSilenceConfig,
+    VadConfig,
+    assemble_full_prepass,
+    prepare_full_prepass_plan,
+)
 from slicing_utils.rough_cut import Phase3Result, run_rough_cut_phase
 
 from .config import AUDIO_EXTENSIONS, RuleWorkflowConfig
@@ -97,20 +104,29 @@ class SlideRulePipeline:
             backend_kwargs=config.asr_backend_kwargs,
             forced_aligner_kwargs=config.forced_aligner_kwargs,
         )
+        self.prepass_scheduler = AsyncPrepassScheduler(
+            self.asr_backend,
+            asr_max_batch_size=config.asr_max_batch_size,
+            aligner_num_workers=config.aligner_num_workers,
+            aligner_max_batch_size=config.aligner_max_batch_size,
+        )
 
     async def run(self) -> dict[str, Any]:
         cfg = self.config
         workflow_started = time.perf_counter()
         logger.info(
             "Starting slide_rule: input=%s output_dir=%s backend=%s device=%s dtype=%s "
-            "asr_batch=%s aligner_batch=%s chunk_mode=%s segment_bounds=%.2f-%.2fs dry_run=%s overwrite=%s",
+            "asr_batch=%s aligner_workers=%s aligner_batch=%s source_concurrency=%s "
+            "chunk_mode=%s segment_bounds=%.2f-%.2fs dry_run=%s overwrite=%s",
             cfg.input_path,
             cfg.output_dir,
             cfg.asr_backend,
             cfg.device,
             cfg.dtype,
             cfg.asr_max_batch_size,
+            cfg.aligner_num_workers,
             cfg.aligner_max_batch_size,
+            cfg.source_concurrency,
             cfg.preprocess_chunk_mode,
             cfg.min_seg_sec,
             cfg.max_seg_sec,
@@ -122,31 +138,45 @@ class SlideRulePipeline:
         if not source_files:
             raise SystemExit(f"No audio files found under {cfg.input_path}.")
 
-        logger.info("Discovered %d source audio file(s)", len(source_files))
-        results: list[SourceResult] = []
-        for index, path in enumerate(source_files, start=1):
-            results.append(await self._process_source(path, index=index, total=len(source_files)))
-        kept_records = sort_records(record for result in results for record in result.kept_records)
-        write_manifest(cfg.output_dir, kept_records)
-        jsonl_path = write_voxcpm_jsonl(
-            cfg.output_dir,
-            voxcpm_jsonl_name(cfg.input_path),
-            kept_records,
-        )
-        summary = self._build_summary(source_files, kept_records, results)
-        summary["voxcpm_jsonl"] = str(jsonl_path)
-        write_summary(cfg.output_dir, summary)
-        logger.info(
-            "Finished slide_rule in %.2fs: sources=%d kept_segments=%d kept_audio_hours=%.4f "
-            "output_dir=%s jsonl=%s",
-            time.perf_counter() - workflow_started,
-            len(source_files),
-            len(kept_records),
-            summary["kept_audio_hours"],
-            cfg.output_dir,
-            jsonl_path,
-        )
-        return summary
+        try:
+            _raise_for_duplicate_stems(source_files)
+            logger.info("Discovered %d source audio file(s)", len(source_files))
+            self.prepass_scheduler.start()
+            source_gate = asyncio.Semaphore(max(1, cfg.source_concurrency))
+
+            async def run_indexed(path: Path, *, index: int) -> tuple[int, SourceResult]:
+                async with source_gate:
+                    return index, await self._process_source(path, index=index, total=len(source_files))
+
+            tasks = [
+                asyncio.create_task(run_indexed(path, index=index))
+                for index, path in enumerate(source_files, start=1)
+            ]
+            indexed_results = await asyncio.gather(*tasks)
+            results = [result for _, result in sorted(indexed_results, key=lambda item: item[0])]
+            kept_records = sort_records(record for result in results for record in result.kept_records)
+            write_manifest(cfg.output_dir, kept_records)
+            jsonl_path = write_voxcpm_jsonl(
+                cfg.output_dir,
+                voxcpm_jsonl_name(cfg.input_path),
+                kept_records,
+            )
+            summary = self._build_summary(source_files, kept_records, results)
+            summary["voxcpm_jsonl"] = str(jsonl_path)
+            write_summary(cfg.output_dir, summary)
+            logger.info(
+                "Finished slide_rule in %.2fs: sources=%d kept_segments=%d kept_audio_hours=%.4f "
+                "output_dir=%s jsonl=%s",
+                time.perf_counter() - workflow_started,
+                len(source_files),
+                len(kept_records),
+                summary["kept_audio_hours"],
+                cfg.output_dir,
+                jsonl_path,
+            )
+            return summary
+        finally:
+            await self.prepass_scheduler.close()
 
     async def _process_source(self, source_path: Path, *, index: int, total: int) -> SourceResult:
         cfg = self.config
@@ -206,17 +236,26 @@ class SlideRulePipeline:
 
         try:
             phase_started = time.perf_counter()
-            prepass: FullPrepass = await asyncio.to_thread(
-                compute_full_prepass,
+            plan = await asyncio.to_thread(
+                prepare_full_prepass_plan,
                 audio,
                 sr,
-                self.asr_backend,
                 chunk_sec=cfg.preprocess_chunk_sec,
                 chunk_mode=cfg.preprocess_chunk_mode,
                 rms_silence_cfg=rms_silence_cfg,
                 vad_cfg=vad_cfg,
-                max_inference_batch_size=cfg.asr_max_batch_size,
+            )
+            transcribed = await self.prepass_scheduler.run_source_prepass(
+                audio=audio,
+                sample_rate=sr,
+                chunks=plan.chunks,
                 source_label=str(source_path),
+            )
+            prepass: FullPrepass = await asyncio.to_thread(
+                assemble_full_prepass,
+                audio,
+                sr,
+                transcribed,
             )
         except Exception as exc:
             result.status = "prepass_error"
@@ -483,7 +522,9 @@ class SlideRulePipeline:
                 "asr_backend": cfg.asr_backend,
                 "device": cfg.device,
                 "dtype": cfg.dtype,
+                "source_concurrency": cfg.source_concurrency,
                 "asr_max_batch_size": cfg.asr_max_batch_size,
+                "aligner_num_workers": cfg.aligner_num_workers,
                 "aligner_max_batch_size": cfg.aligner_max_batch_size,
                 "min_seg_sec": cfg.min_seg_sec,
                 "max_seg_sec": cfg.max_seg_sec,
@@ -515,6 +556,20 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return value.tolist()
     raise TypeError(f"Object of type {type(value)!r} is not JSON serializable")
+
+
+def _raise_for_duplicate_stems(source_files: Sequence[Path]) -> None:
+    paths_by_stem: dict[str, list[Path]] = {}
+    for path in source_files:
+        paths_by_stem.setdefault(path.stem, []).append(path)
+    duplicates = {stem: paths for stem, paths in paths_by_stem.items() if len(paths) > 1}
+    if not duplicates:
+        return
+    details = "; ".join(
+        f"{stem}: {', '.join(str(path) for path in paths)}"
+        for stem, paths in sorted(duplicates.items())
+    )
+    raise SystemExit(f"Duplicate source filename stems would collide in output directories: {details}")
 
 
 def _format_counts(counts: dict[str, int]) -> str:

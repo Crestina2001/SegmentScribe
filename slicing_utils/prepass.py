@@ -13,6 +13,7 @@ once (vs. slide_LLM which re-runs ASR on every sliding window).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
@@ -452,6 +453,281 @@ class AsrChunkDraft:
     text: str
     language: str
     span: tuple[int, int]
+
+
+@dataclass
+class _AsrQueueRequest:
+    audio: np.ndarray
+    sample_rate: int
+    span: tuple[int, int]
+    source_label: str
+    chunk_index: int
+    source_total_chunks: int
+    future: asyncio.Future[AsrChunkDraft]
+
+
+@dataclass
+class _AlignQueueRequest:
+    audio: np.ndarray
+    sample_rate: int
+    draft: AsrChunkDraft
+    result_index: int
+    future: asyncio.Future[tuple[int, tuple[str, list[CharToken], tuple[int, int]]]]
+
+
+class AsyncPrepassScheduler:
+    """Shared async prepass scheduler with one ASR worker and N aligner workers."""
+
+    _BATCH_FILL_DELAY_SEC = 0.01
+
+    def __init__(
+        self,
+        asr_backend: AsrBackend,
+        *,
+        asr_max_batch_size: int,
+        aligner_num_workers: int,
+        aligner_max_batch_size: int,
+    ) -> None:
+        self._asr_backend = asr_backend
+        self._asr_batch_size = max(1, int(asr_max_batch_size))
+        self._aligner_num_workers = max(1, int(aligner_num_workers))
+        self._aligner_batch_size = max(1, int(aligner_max_batch_size))
+        self._asr_queue: asyncio.Queue[_AsrQueueRequest | None] = asyncio.Queue()
+        self._aligner_queue: asyncio.Queue[_AlignQueueRequest | None] = asyncio.Queue()
+        self._asr_worker: asyncio.Task[None] | None = None
+        self._aligner_workers: list[asyncio.Task[None]] = []
+        self._asr_progress = None
+        self._aligner_progress = None
+
+    def start(self) -> None:
+        if self._asr_worker is None:
+            self._asr_worker = asyncio.create_task(self._run_asr_worker())
+        if not self._aligner_workers:
+            self._aligner_workers = [
+                asyncio.create_task(self._run_aligner_worker(worker_index=index))
+                for index in range(1, self._aligner_num_workers + 1)
+            ]
+
+    async def close(self) -> None:
+        if self._asr_worker is not None:
+            await self._asr_queue.put(None)
+            await self._asr_worker
+            self._asr_worker = None
+        if self._aligner_workers:
+            for _worker in self._aligner_workers:
+                await self._aligner_queue.put(None)
+            await asyncio.gather(*self._aligner_workers)
+            self._aligner_workers = []
+        if self._asr_progress is not None:
+            self._asr_progress.close()
+            self._asr_progress = None
+        if self._aligner_progress is not None:
+            self._aligner_progress.close()
+            self._aligner_progress = None
+
+    async def run_source_prepass(
+        self,
+        *,
+        audio: np.ndarray,
+        sample_rate: int,
+        chunks: Sequence[tuple[int, int]],
+        source_label: str,
+    ) -> list[tuple[str, list[CharToken], tuple[int, int]]]:
+        if not chunks:
+            return []
+
+        loop = asyncio.get_running_loop()
+        asr_requests: list[_AsrQueueRequest] = []
+        total_chunks = len(chunks)
+        self._ensure_asr_progress(total_chunks)
+        for chunk_index, (start, end) in enumerate(chunks, start=1):
+            request = _AsrQueueRequest(
+                audio=np.ascontiguousarray(audio[start:end], dtype=np.float32),
+                sample_rate=sample_rate,
+                span=(start, end),
+                source_label=source_label,
+                chunk_index=chunk_index,
+                source_total_chunks=total_chunks,
+                future=loop.create_future(),
+            )
+            asr_requests.append(request)
+            await self._asr_queue.put(request)
+
+        drafts = list(await asyncio.gather(*(request.future for request in asr_requests)))
+        return await self._align_source_drafts(
+            audio=audio,
+            sample_rate=sample_rate,
+            drafts=drafts,
+        )
+
+    async def _align_source_drafts(
+        self,
+        *,
+        audio: np.ndarray,
+        sample_rate: int,
+        drafts: Sequence[AsrChunkDraft],
+    ) -> list[tuple[str, list[CharToken], tuple[int, int]]]:
+        results: list[tuple[str, list[CharToken], tuple[int, int]]] = [
+            ("", [], draft.span) for draft in drafts
+        ]
+        requests: list[_AlignQueueRequest] = []
+        loop = asyncio.get_running_loop()
+        non_empty_count = sum(1 for draft in drafts if str(draft.text or "").strip())
+        if non_empty_count <= 0:
+            return results
+        self._ensure_aligner_progress(non_empty_count)
+        for index, draft in enumerate(drafts):
+            if not str(draft.text or "").strip():
+                continue
+            start, end = draft.span
+            request = _AlignQueueRequest(
+                audio=np.ascontiguousarray(audio[start:end], dtype=np.float32),
+                sample_rate=sample_rate,
+                draft=draft,
+                result_index=index,
+                future=loop.create_future(),
+            )
+            requests.append(request)
+            await self._aligner_queue.put(request)
+        aligned_items = await asyncio.gather(*(request.future for request in requests))
+        for index, item in aligned_items:
+            results[index] = item
+        return results
+
+    async def _run_asr_worker(self) -> None:
+        while True:
+            first = await self._asr_queue.get()
+            if first is None:
+                return
+            batch = await self._drain_batch(self._asr_queue, first, self._asr_batch_size)
+            await self._process_asr_batch(batch)
+
+    async def _run_aligner_worker(self, *, worker_index: int) -> None:
+        aligner_backend = await asyncio.to_thread(
+            self._asr_backend.create_aligner_worker,
+            worker_index=worker_index,
+        )
+        while True:
+            first = await self._aligner_queue.get()
+            if first is None:
+                return
+            batch = await self._drain_batch(self._aligner_queue, first, self._aligner_batch_size)
+            await self._process_aligner_batch(batch, aligner_backend)
+
+    async def _drain_batch(
+        self,
+        queue: asyncio.Queue[Any],
+        first: Any,
+        max_batch_size: int,
+    ) -> list[Any]:
+        batch = [first]
+        await asyncio.sleep(self._BATCH_FILL_DELAY_SEC)
+        while len(batch) < max_batch_size:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item is None:
+                await queue.put(None)
+                break
+            batch.append(item)
+        return batch
+
+    async def _process_asr_batch(self, batch: Sequence[_AsrQueueRequest]) -> None:
+        windows = [(request.audio, request.sample_rate) for request in batch]
+        try:
+            transcripts = await asyncio.to_thread(self._asr_backend.transcribe_windows_asr_only, windows)
+        except Exception as exc:
+            logger.warning("Batched ASR failed for %d chunk(s): %s", len(batch), exc)
+            transcripts = []
+        drafts: list[AsrChunkDraft] = []
+        for index, request in enumerate(batch):
+            if index < len(transcripts):
+                tr = transcripts[index]
+                drafts.append(
+                    AsrChunkDraft(
+                        text=str(tr.text or ""),
+                        language=str(tr.language or ""),
+                        span=request.span,
+                    )
+                )
+            else:
+                drafts.append(AsrChunkDraft(text="", language="", span=request.span))
+        for request, result in zip(batch, drafts):
+            if not request.future.done():
+                request.future.set_result(result)
+        if self._asr_progress is not None:
+            self._asr_progress.update(len(batch))
+
+    async def _process_aligner_batch(
+        self,
+        batch: Sequence[_AlignQueueRequest],
+        aligner_backend: Any,
+    ) -> None:
+        windows = [(request.audio, request.sample_rate) for request in batch]
+        transcripts = [
+            WindowTranscriptShim(
+                text=request.draft.text,
+                language=request.draft.language,
+                chars=[],
+                duration_sec=0.0,
+            )
+            for request in batch
+        ]
+        try:
+            aligned = await asyncio.to_thread(
+                aligner_backend.align_window_transcripts,
+                windows,
+                transcripts,
+            )
+        except Exception as exc:
+            logger.warning("Batched forced alignment failed for %d chunk(s): %s", len(batch), exc)
+            aligned = []
+        for item_index, request in enumerate(batch):
+            if item_index < len(aligned):
+                tr = aligned[item_index]
+                start, end = request.draft.span
+                offset = start / float(request.sample_rate)
+                shifted = [
+                    CharToken(
+                        idx=c.idx,
+                        char=c.char,
+                        start_sec=float(c.start_sec) + offset,
+                        end_sec=float(c.end_sec) + offset,
+                    )
+                    for c in tr.chars
+                ]
+                item = (str(request.draft.text or ""), shifted, request.draft.span)
+            else:
+                item = ("", [], request.draft.span)
+            if not request.future.done():
+                request.future.set_result((request.result_index, item))
+        if self._aligner_progress is not None:
+            self._aligner_progress.update(len(batch))
+
+    def _ensure_asr_progress(self, added_total: int) -> None:
+        if self._asr_progress is None:
+            self._asr_progress = tqdm(
+                total=0,
+                desc="Qwen3-ASR",
+                unit="win",
+                dynamic_ncols=True,
+                leave=False,
+            )
+        self._asr_progress.total = int(self._asr_progress.total or 0) + int(added_total)
+        self._asr_progress.refresh()
+
+    def _ensure_aligner_progress(self, added_total: int) -> None:
+        if self._aligner_progress is None:
+            self._aligner_progress = tqdm(
+                total=0,
+                desc="Qwen3-ForcedAligner",
+                unit="win",
+                dynamic_ncols=True,
+                leave=False,
+            )
+        self._aligner_progress.total = int(self._aligner_progress.total or 0) + int(added_total)
+        self._aligner_progress.refresh()
 
 
 def _align_transcribed_chunks(
