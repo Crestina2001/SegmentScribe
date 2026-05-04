@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+import queue
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,6 +128,7 @@ class AsrBackend:
         dtype: str = "bfloat16",
         max_inference_batch_size: int = 1,
         max_aligner_batch_size: Optional[int] = None,
+        aligner_concurrency: int = 1,
         max_new_tokens: int = 512,
         language: Optional[str] = None,
         backend_kwargs: Optional[dict[str, Any]] = None,
@@ -154,10 +156,14 @@ class AsrBackend:
             if max_aligner_batch_size is not None
             else max(1, int(max_inference_batch_size or 1))
         )
+        self.aligner_concurrency = max(1, int(aligner_concurrency or 1))
         self._forced_aligner_cls = Qwen3ForcedAligner
         self._forced_aligner_path = resolved_aligner_path
         self._forced_aligner_kwargs = forced_aligner_kwargs
-        self._forced_aligner = None
+        self._forced_aligners: list[Any | None] = [None] * self.aligner_concurrency
+        self._forced_aligner_slots: queue.Queue[int] = queue.Queue()
+        for slot in range(self.aligner_concurrency):
+            self._forced_aligner_slots.put(slot)
         self._forced_aligner_lock = threading.RLock()
 
         if backend == "transformers":
@@ -321,8 +327,10 @@ class AsrBackend:
             leave=False,
         )
         try:
-            with self._forced_aligner_lock:
-                aligner = self._get_forced_aligner_unlocked()
+            slot = self._forced_aligner_slots.get()
+            try:
+                with self._forced_aligner_lock:
+                    aligner = self._get_forced_aligner_unlocked(slot)
                 for offset in range(0, len(jobs), batch_size):
                     job_batch = jobs[offset : offset + batch_size]
                     index_batch = [item[0] for item in job_batch]
@@ -337,22 +345,29 @@ class AsrBackend:
                     for index, alignment in zip(index_batch, aligned_batch):
                         alignments[index] = alignment
                     progress.update(len(audio_batch))
+            finally:
+                self._forced_aligner_slots.put(slot)
         finally:
             progress.close()
         return alignments
 
     def _get_forced_aligner(self) -> Any:
         with self._forced_aligner_lock:
-            return self._get_forced_aligner_unlocked()
+            return self._get_forced_aligner_unlocked(0)
 
-    def _get_forced_aligner_unlocked(self) -> Any:
-        if self._forced_aligner is None:
-            logger.info("Loading Qwen3 forced aligner: %s", self._forced_aligner_path)
-            self._forced_aligner = self._forced_aligner_cls.from_pretrained(
+    def _get_forced_aligner_unlocked(self, slot: int) -> Any:
+        if self._forced_aligners[slot] is None:
+            logger.info(
+                "Loading Qwen3 forced aligner slot %d/%d: %s",
+                slot + 1,
+                self.aligner_concurrency,
+                self._forced_aligner_path,
+            )
+            self._forced_aligners[slot] = self._forced_aligner_cls.from_pretrained(
                 self._forced_aligner_path,
                 **self._forced_aligner_kwargs,
             )
-        return self._forced_aligner
+        return self._forced_aligners[slot]
 
 
 def _should_log_progress(offset: int, batch_len: int, total: int, batch_size: int) -> bool:

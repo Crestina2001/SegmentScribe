@@ -198,6 +198,7 @@ if is_true "${DO_SLICE:-true}"; then
     --dtype "${DTYPE:-bfloat16}"
     --asr-max-batch-size "${ASR_MAX_BATCH_SIZE:-1}"
     --aligner-max-batch-size "${ALIGNER_MAX_BATCH_SIZE:-1}"
+    --aligner-concurrency "${ALIGNER_CONCURRENCY:-1}"
     --preprocess-chunk-sec "${PREPROCESS_CHUNK_SEC:-30}"
     --preprocess-chunk-mode "${PREPROCESS_CHUNK_MODE:-rms_silence}"
     --preprocess-min-chunk-sec "${PREPROCESS_MIN_CHUNK_SEC:-5}"

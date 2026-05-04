@@ -77,6 +77,7 @@ PREPROCESS_MIN_CHUNK_SEC=5
 PREPROCESS_MAX_CHUNK_SEC=15
 ASR_MAX_BATCH_SIZE=8
 ALIGNER_MAX_BATCH_SIZE=1
+ALIGNER_CONCURRENCY=1
 ```
 
 This lets Qwen3-ASR and Qwen3-ForcedAligner see the same short audio window,
@@ -377,6 +378,9 @@ Useful LLM options:
   ASR inference batch (default: `1`). When one source has fewer remaining
   chunks than the batch capacity, chunks from the next ready source can fill the
   same ASR batch.
+- `--aligner-concurrency`: number of forced-aligner instances allowed to run at
+  once (default: `1`). Values above `1` can improve throughput on short
+  pre-sliced inputs, at the cost of loading additional aligner models.
 - `--llm-concurrency`: maximum number of `slide_LLM` LLM calls in flight at
   once (default: `8`). The gateway's provider/model/global rate limits still
   apply underneath this cap.

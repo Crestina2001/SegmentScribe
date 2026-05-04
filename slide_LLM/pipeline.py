@@ -211,6 +211,7 @@ class SlideLLMPipeline:
             dtype=config.dtype,
             max_inference_batch_size=config.asr_max_batch_size,
             max_aligner_batch_size=config.aligner_max_batch_size,
+            aligner_concurrency=config.aligner_concurrency,
             language=config.language,
             backend_kwargs=config.asr_backend_kwargs,
             forced_aligner_kwargs=config.forced_aligner_kwargs,
@@ -224,13 +225,15 @@ class SlideLLMPipeline:
         workflow_started = time.perf_counter()
         logger.info(
             "Starting slide_LLM: input=%s output_dir=%s asr_backend=%s llm_model=%s "
-            "asr_batch=%s aligner_batch=%s chunk_mode=%s segment_bounds=%.2f-%.2fs dry_run=%s overwrite=%s",
+            "asr_batch=%s aligner_batch=%s aligner_concurrency=%s chunk_mode=%s "
+            "segment_bounds=%.2f-%.2fs dry_run=%s overwrite=%s",
             cfg.input_path,
             cfg.output_dir,
             cfg.asr_backend,
             cfg.llm_model,
             cfg.asr_max_batch_size,
             cfg.aligner_max_batch_size,
+            cfg.aligner_concurrency,
             cfg.preprocess_chunk_mode,
             cfg.min_seg_sec,
             cfg.max_seg_sec,
@@ -678,6 +681,7 @@ class SlideLLMPipeline:
                 "dtype": cfg.dtype,
                 "asr_max_batch_size": cfg.asr_max_batch_size,
                 "aligner_max_batch_size": cfg.aligner_max_batch_size,
+                "aligner_concurrency": cfg.aligner_concurrency,
                 "min_seg_sec": cfg.min_seg_sec,
                 "max_seg_sec": cfg.max_seg_sec,
                 "preprocess_chunk_sec": cfg.preprocess_chunk_sec,

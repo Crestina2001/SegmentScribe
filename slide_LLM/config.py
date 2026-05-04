@@ -32,6 +32,7 @@ class LLMWorkflowConfig:
     dtype: str = "bfloat16"
     asr_max_batch_size: int = 8
     aligner_max_batch_size: int = 1
+    aligner_concurrency: int = 1
     min_seg_sec: float = 3.0
     max_seg_sec: float = 10.0
     language: Optional[str] = None
