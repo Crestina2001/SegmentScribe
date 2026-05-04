@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict, is_dataclass
 from typing import Any, Iterable
 
-from .models import ToolCall, ToolDefinition
+from .models import Tool, ToolCall, ToolDefinition
 
 STRUCTURED_OUTPUT_TOOL_NAME = "submit_structured_output"
 STRUCTURED_OUTPUT_TOOL_DESCRIPTION = "Submit the final response as a JSON object matching the requested schema."
@@ -36,7 +36,7 @@ class ToolCallManager:
 
     def normalize_definitions(
         self,
-        tools: Iterable[ToolDefinition | dict[str, Any]] | None,
+        tools: Iterable[Tool | ToolDefinition | dict[str, Any]] | None,
     ) -> list[dict[str, Any]] | None:
         if not tools:
             return None
@@ -162,7 +162,7 @@ class ToolCallManager:
         return parsed if isinstance(parsed, dict) else {}
 
     @staticmethod
-    def _to_mapping(value: ToolDefinition | dict[str, Any]) -> dict[str, Any]:
+    def _to_mapping(value: Tool | ToolDefinition | dict[str, Any]) -> dict[str, Any]:
         if is_dataclass(value):
             return asdict(value)
         if isinstance(value, dict):

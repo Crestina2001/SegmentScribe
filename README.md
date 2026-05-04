@@ -321,6 +321,8 @@ Useful options:
 - `--language`: optional language hint passed to the ASR backend.
 - `--dry-run`: run the pipeline without writing final audio clips.
 - `--enable-punctuation-correction`: enable rule-based punctuation edits.
+- `--rough-cut-strategy`: deterministic rough planner strategy. Default:
+  `priority_silence_v3`, a combined strong+weak pause-percentile planner.
 
 ## LLM-assisted slicing: slide_LLM
 
@@ -361,8 +363,11 @@ Useful LLM options:
 - `--punct-llm-model`: optional override for punctuation correction when enabled.
 - `--rough-llm-model`: optional override for rough cut planning.
 - `--rough-cut-strategy`: rough planner strategy. Default:
-  `llm_pause_priority_silence_v2`; use `llm_tool` for the older tool-calling
-  rough planner.
+  `llm_slice_v1`; use `llm_tool` for the older tool-calling
+  rough planner. Deterministic strategies such as `priority_silence_v3` are
+  also accepted.
+  In `scripts/run_full_pipeline.sh`, `SLICE_MODE=llm` reads this from
+  `LLM_ROUGH_CUT_STRATEGY`; `ROUGH_CUT_STRATEGY` is reserved for `SLICE_MODE=rule`.
 - `--llm-provider`: optional provider name; if omitted, the gateway tries to
   infer it from the model name.
 - `--env-path`: optional path to the `.env` file containing provider keys.

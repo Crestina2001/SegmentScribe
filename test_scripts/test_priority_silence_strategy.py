@@ -8,6 +8,7 @@ import slicing_utils.rough_cut as rough_cut
 from slicing_utils.asr import CharToken
 from slicing_utils.preprocess import PausePercentiles
 from slicing_utils.rough_cut import RoughBoundary
+from slide_LLM.cli import build_parser as build_llm_parser
 from slide_rule.cli import build_parser
 
 
@@ -90,6 +91,39 @@ def _priority_plan_v2(
         audio=np.zeros(100, dtype=np.float32),
         sample_rate=10,
         prepass=_stats(weak_p60=weak_p60),
+        chars=_chars(char_count),
+        boundaries=boundaries,
+        min_seg_sec=0.5,
+        max_seg_sec=max_seg_sec,
+    )
+
+
+def _priority_plan_v3(
+    boundaries: list[RoughBoundary],
+    monkeypatch,
+    *,
+    combined_p40: float = 100.0,
+    combined_p60: float = 200.0,
+    combined_p80: float = 300.0,
+    max_seg_sec: float = 10.0,
+    char_count: int = 4,
+):
+    _patch_raw_duration_estimator(monkeypatch)
+    combined = PausePercentiles(
+        10,
+        10.0,
+        50.0,
+        combined_p40,
+        150.0,
+        combined_p60,
+        combined_p80,
+        500.0,
+    )
+    monkeypatch.setattr(rough_cut, "_priority_v3_combined_percentiles", lambda _boundaries: combined)
+    return rough_cut._plan_segments_priority_silence_v3(
+        audio=np.zeros(100, dtype=np.float32),
+        sample_rate=10,
+        prepass=_stats(),
         chars=_chars(char_count),
         boundaries=boundaries,
         min_seg_sec=0.5,
@@ -217,6 +251,44 @@ def test_slide_rule_cli_accepts_priority_silence_v2():
     )
 
     assert args.rough_cut_strategy == "priority_silence_v2"
+
+
+def test_cli_accepts_priority_silence_v3_for_rule_and_llm():
+    rule_parser = build_parser()
+    rule_args = rule_parser.parse_args(
+        [
+            "--input",
+            ".",
+            "--output-dir",
+            "out",
+            "--model-path",
+            "asr",
+            "--aligner-path",
+            "aligner",
+            "--rough-cut-strategy",
+            "priority_silence_v3",
+        ]
+    )
+    llm_parser = build_llm_parser()
+    llm_args = llm_parser.parse_args(
+        [
+            "--input",
+            ".",
+            "--output-dir",
+            "out",
+            "--model-path",
+            "asr",
+            "--aligner-path",
+            "aligner",
+            "--llm-model",
+            "model",
+            "--rough-cut-strategy",
+            "priority_silence_v3",
+        ]
+    )
+
+    assert rule_args.rough_cut_strategy == "priority_silence_v3"
+    assert llm_args.rough_cut_strategy == "priority_silence_v3"
 
 
 def test_slide_rule_cli_accepts_dp_strategy_2():
@@ -378,6 +450,140 @@ def test_priority_v2_step4_can_reuse_failed_top50_position(monkeypatch):
 
 def test_priority_v2_unresolved_leftover_is_dropped(monkeypatch):
     segments, chosen_cuts, error, _meta = _priority_plan_v2(
+        [
+            _boundary(3, kind="final", pause_ms=0.0),
+        ],
+        monkeypatch,
+        max_seg_sec=1.1,
+    )
+
+    assert error is None
+    assert [(seg.char_start_idx, seg.char_end_idx, seg.drop) for seg in segments] == [(0, 3, True)]
+    assert [cut["strategy_phase"] for cut in chosen_cuts] == ["leftover"]
+
+
+def test_priority_v3_combined_percentiles_use_strong_and_weak_candidates_only():
+    combined = rough_cut._priority_v3_combined_percentiles(
+        [
+            _boundary(0, kind="strong", pause_ms=100.0),
+            _boundary(1, kind="weak", pause_ms=200.0),
+            _boundary(2, kind="strong", pause_ms=300.0),
+            _boundary(3, kind="weak", pause_ms=400.0),
+            _boundary(4, kind="strong", pause_ms=500.0),
+            _boundary(5, kind="final", pause_ms=999.0),
+        ]
+    )
+
+    assert combined.count == 5
+    assert combined.is_fallback is False
+    assert combined.p40_ms == 260.0
+    assert combined.p60_ms == 340.0
+    assert combined.p80_ms == 420.0
+
+
+def test_priority_v3_must_cut_requires_strong_combined_p80(monkeypatch):
+    segments, chosen_cuts, error, meta = _priority_plan_v3(
+        [
+            _boundary(1, kind="weak", pause_ms=500.0),
+            _boundary(3, kind="strong", pause_ms=300.0),
+            _boundary(5, kind="final", pause_ms=0.0),
+        ],
+        monkeypatch,
+        combined_p60=200.0,
+        combined_p80=300.0,
+        max_seg_sec=2.0,
+        char_count=6,
+    )
+
+    assert error is None
+    assert meta["priority_v3_must_cut_boundary_count"] == 2
+    assert [cut["strategy_phase"] for cut in chosen_cuts] == [
+        "combined_p60_cut",
+        "combined_p60_cut",
+        "leftover",
+    ]
+    assert [(seg.char_start_idx, seg.char_end_idx, seg.drop) for seg in segments] == [
+        (0, 1, False),
+        (2, 3, False),
+        (4, 5, True),
+    ]
+
+
+def test_priority_v3_strong_p60_phase_locks_before_weak_p60(monkeypatch):
+    segments, chosen_cuts, error, _meta = _priority_plan_v3(
+        [
+            _boundary(1, kind="strong", pause_ms=220.0),
+            _boundary(2, kind="weak", pause_ms=500.0),
+            _boundary(3, kind="final", pause_ms=0.0),
+        ],
+        monkeypatch,
+        combined_p60=200.0,
+        combined_p80=300.0,
+        max_seg_sec=1.1,
+    )
+
+    assert error is None
+    assert [(seg.char_start_idx, seg.char_end_idx, seg.drop) for seg in segments] == [
+        (0, 1, False),
+        (2, 3, False),
+    ]
+    assert [cut["strategy_phase"] for cut in chosen_cuts] == [
+        "combined_p60_strong_cut",
+        "combined_p60_strong_cut",
+    ]
+
+
+def test_priority_v3_combined_p60_phase_can_release_to_weak(monkeypatch):
+    segments, chosen_cuts, error, meta = _priority_plan_v3(
+        [
+            _boundary(1, kind="weak", pause_ms=210.0),
+            _boundary(3, kind="final", pause_ms=0.0),
+        ],
+        monkeypatch,
+        combined_p60=200.0,
+        combined_p80=300.0,
+        max_seg_sec=1.1,
+    )
+
+    assert error is None
+    assert meta["priority_v3_combined_p60_strong_cut_candidate_count"] == 0
+    assert [(seg.char_start_idx, seg.char_end_idx, seg.drop) for seg in segments] == [
+        (0, 1, False),
+        (2, 3, False),
+    ]
+    assert [cut["strategy_phase"] for cut in chosen_cuts] == [
+        "combined_p60_cut",
+        "combined_p60_cut",
+    ]
+
+
+def test_priority_v3_combined_p40_final_release(monkeypatch):
+    segments, chosen_cuts, error, meta = _priority_plan_v3(
+        [
+            _boundary(1, kind="weak", pause_ms=120.0),
+            _boundary(3, kind="final", pause_ms=0.0),
+        ],
+        monkeypatch,
+        combined_p40=100.0,
+        combined_p60=200.0,
+        combined_p80=300.0,
+        max_seg_sec=1.1,
+    )
+
+    assert error is None
+    assert meta["priority_v3_combined_p40_cut_candidate_count"] == 1
+    assert [(seg.char_start_idx, seg.char_end_idx, seg.drop) for seg in segments] == [
+        (0, 1, False),
+        (2, 3, False),
+    ]
+    assert [cut["strategy_phase"] for cut in chosen_cuts] == [
+        "combined_p40_cut",
+        "combined_p40_cut",
+    ]
+
+
+def test_priority_v3_unresolved_leftover_is_dropped(monkeypatch):
+    segments, chosen_cuts, error, _meta = _priority_plan_v3(
         [
             _boundary(3, kind="final", pause_ms=0.0),
         ],

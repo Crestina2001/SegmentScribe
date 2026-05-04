@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 ProviderName = Literal["openai", "minimax", "anthropic", "gemini", "deepseek"]
 
@@ -11,6 +11,15 @@ class ToolDefinition:
     name: str
     description: str
     parameters: dict[str, Any]
+
+
+@dataclass(slots=True, frozen=True)
+class Tool:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    func: Callable[..., Any]
+    serialize: Callable[[Any], str] | None = None
 
 
 @dataclass(slots=True, frozen=True)

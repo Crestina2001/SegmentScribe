@@ -20,9 +20,11 @@ PROVIDERS: tuple[ProviderName, ...] = ("openai", "minimax", "anthropic", "gemini
 ROUGH_CUT_STRATEGIES = (
     "llm_pause_priority_silence_v2",
     "llm_tool",
+    "llm_slice_v1",
     "legacy_dp",
     "priority_silence_v1",
     "priority_silence_v2",
+    "priority_silence_v3",
     "dp_strategy_2",
 )
 
@@ -45,8 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rough-cut-strategy",
         choices=ROUGH_CUT_STRATEGIES,
-        default="llm_pause_priority_silence_v2",
-        help="Rough-cut planner strategy. Default: llm_pause_priority_silence_v2.",
+        default="llm_slice_v1",
+        help="Rough-cut planner strategy. Default: llm_slice_v1.",
     )
     parser.add_argument(
         "--enable-punctuation-correction",

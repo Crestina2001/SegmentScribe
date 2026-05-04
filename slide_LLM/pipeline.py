@@ -71,6 +71,10 @@ class PooledLLMClient:
         async with self._pool:
             return await self._client.send_prompt(*args, **kwargs)
 
+    async def send_prompt_autoTC(self, *args: Any, **kwargs: Any) -> Any:
+        async with self._pool:
+            return await self._client.send_prompt_autoTC(*args, **kwargs)
+
     async def close(self) -> None:
         await self._client.close()
 
@@ -431,7 +435,7 @@ class SlideLLMPipeline:
 
         try:
             phase_started = time.perf_counter()
-            if cfg.rough_cut_strategy in {"llm_pause_priority_silence_v2", "llm_tool"}:
+            if cfg.rough_cut_strategy in {"llm_pause_priority_silence_v2", "llm_tool", "llm_slice_v1"}:
                 phase3: Phase3Result = await run_llm_rough_cut_phase(
                     audio=audio,
                     sample_rate=sr,

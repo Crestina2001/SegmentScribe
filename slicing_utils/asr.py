@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -157,6 +158,7 @@ class AsrBackend:
         self._forced_aligner_path = resolved_aligner_path
         self._forced_aligner_kwargs = forced_aligner_kwargs
         self._forced_aligner = None
+        self._forced_aligner_lock = threading.RLock()
 
         if backend == "transformers":
             model_kwargs = {
@@ -306,7 +308,6 @@ class AsrBackend:
         if not pending_audio:
             return alignments
 
-        aligner = self._get_forced_aligner()
         batch_size = max(1, int(self.max_aligner_batch_size or 1))
         jobs = sorted(
             zip(pending_indices, pending_audio, pending_text, pending_language),
@@ -320,25 +321,31 @@ class AsrBackend:
             leave=False,
         )
         try:
-            for offset in range(0, len(jobs), batch_size):
-                job_batch = jobs[offset : offset + batch_size]
-                index_batch = [item[0] for item in job_batch]
-                audio_batch = [item[1] for item in job_batch]
-                text_batch = [item[2] for item in job_batch]
-                language_batch = [item[3] for item in job_batch]
-                aligned_batch = aligner.align(
-                    audio=audio_batch,
-                    text=text_batch,
-                    language=language_batch,
-                )
-                for index, alignment in zip(index_batch, aligned_batch):
-                    alignments[index] = alignment
-                progress.update(len(audio_batch))
+            with self._forced_aligner_lock:
+                aligner = self._get_forced_aligner_unlocked()
+                for offset in range(0, len(jobs), batch_size):
+                    job_batch = jobs[offset : offset + batch_size]
+                    index_batch = [item[0] for item in job_batch]
+                    audio_batch = [item[1] for item in job_batch]
+                    text_batch = [item[2] for item in job_batch]
+                    language_batch = [item[3] for item in job_batch]
+                    aligned_batch = aligner.align(
+                        audio=audio_batch,
+                        text=text_batch,
+                        language=language_batch,
+                    )
+                    for index, alignment in zip(index_batch, aligned_batch):
+                        alignments[index] = alignment
+                    progress.update(len(audio_batch))
         finally:
             progress.close()
         return alignments
 
     def _get_forced_aligner(self) -> Any:
+        with self._forced_aligner_lock:
+            return self._get_forced_aligner_unlocked()
+
+    def _get_forced_aligner_unlocked(self) -> Any:
         if self._forced_aligner is None:
             logger.info("Loading Qwen3 forced aligner: %s", self._forced_aligner_path)
             self._forced_aligner = self._forced_aligner_cls.from_pretrained(

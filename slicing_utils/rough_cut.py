@@ -26,6 +26,7 @@ import numpy as np
 from .asr import CharToken
 
 from .prepass import FullPrepass, pause_ms_after_token
+from .preprocess import PausePercentiles, _quantiles
 from .shared import STRONG_STOPS, WEAK_STOPS, is_punct_or_space
 
 
@@ -595,6 +596,46 @@ def _priority_v2_legal_cut(boundary: RoughBoundary, prepass: FullPrepass) -> boo
         boundary.boundary_kind in {"strong", "weak"}
         and boundary.pause_ms >= float(prepass.weak.p60_ms)
     )
+
+
+def _priority_v3_combined_percentiles(boundaries: Sequence[RoughBoundary]) -> PausePercentiles:
+    return _quantiles(
+        [
+            float(boundary.pause_ms)
+            for boundary in boundaries
+            if boundary.boundary_kind in {"strong", "weak"}
+        ]
+    )
+
+
+def _priority_v3_must_cut(boundary: RoughBoundary, combined: PausePercentiles) -> bool:
+    if boundary.boundary_kind == "final":
+        return True
+    return boundary.boundary_kind == "strong" and boundary.pause_ms >= float(combined.p80_ms)
+
+
+def _priority_v3_strong_p60_cut(boundary: RoughBoundary, combined: PausePercentiles) -> bool:
+    return boundary.boundary_kind == "strong" and boundary.pause_ms >= float(combined.p60_ms)
+
+
+def _priority_v3_p60_cut(boundary: RoughBoundary, combined: PausePercentiles) -> bool:
+    return boundary.boundary_kind in {"strong", "weak"} and boundary.pause_ms >= float(combined.p60_ms)
+
+
+def _priority_v3_p40_cut(boundary: RoughBoundary, combined: PausePercentiles) -> bool:
+    return boundary.boundary_kind in {"strong", "weak"} and boundary.pause_ms >= float(combined.p40_ms)
+
+
+def _priority_v3_boundary_policy(boundary: RoughBoundary, combined: PausePercentiles) -> str:
+    if _priority_v3_must_cut(boundary, combined):
+        return "must_cut"
+    if _priority_v3_strong_p60_cut(boundary, combined):
+        return "combined_p60_strong_cut"
+    if _priority_v3_p60_cut(boundary, combined):
+        return "combined_p60_cut"
+    if _priority_v3_p40_cut(boundary, combined):
+        return "combined_p40_cut"
+    return "not_candidate"
 
 
 def _dp_strategy_2_must_cut(boundary: RoughBoundary, prepass: FullPrepass) -> bool:
@@ -1322,6 +1363,144 @@ def _plan_segments_priority_silence_v2(
     return segments, chosen_cuts, None, meta
 
 
+def _priority_v3_candidates(
+    boundaries: Sequence[RoughBoundary],
+    regions: Sequence[_PriorityRegion],
+    combined: PausePercentiles,
+    predicate: Any,
+) -> list[RoughBoundary]:
+    return [
+        boundary
+        for boundary in boundaries
+        if _candidate_in_regions(boundary, regions)
+        and predicate(boundary, combined)
+        and not _priority_v3_must_cut(boundary, combined)
+    ]
+
+
+def _plan_segments_priority_silence_v3(
+    *,
+    audio: np.ndarray,
+    sample_rate: int,
+    prepass: FullPrepass,
+    chars: Sequence[CharToken],
+    boundaries: Sequence[RoughBoundary],
+    min_seg_sec: float,
+    max_seg_sec: float,
+) -> tuple[list[RoughSegment], list[dict[str, Any]], Optional[str], dict[str, Any]]:
+    if not boundaries:
+        return [], [], "no candidate punctuation boundaries found", {}
+
+    combined = _priority_v3_combined_percentiles(boundaries)
+    trim_cache: dict[tuple[int, int], float] = {}
+    must_boundaries = [
+        boundary for boundary in boundaries if _priority_v3_must_cut(boundary, combined)
+    ]
+    if not must_boundaries or must_boundaries[-1].boundary_kind != "final":
+        return [], [], "priority_silence_v3 found no final must_cut boundary", {}
+
+    must_regions: list[_PriorityRegion] = []
+    region_start = 0
+    for region_end in must_boundaries:
+        if region_start <= region_end.token_idx:
+            must_regions.append(_PriorityRegion(start_token_idx=region_start, end_boundary=region_end))
+        region_start = region_end.token_idx + 1
+
+    solved_spans: list[_PrioritySpan] = []
+    current_regions = must_regions
+    phase_specs = [
+        (
+            "combined_p60_strong_cut",
+            _priority_v3_strong_p60_cut,
+            "segments_before_silence",
+            True,
+        ),
+        (
+            "combined_p60_cut",
+            _priority_v3_p60_cut,
+            "silence_before_segments",
+            False,
+        ),
+        (
+            "combined_p40_cut",
+            _priority_v3_p40_cut,
+            "silence_before_segments",
+            False,
+        ),
+    ]
+    phase_candidate_counts: dict[str, int] = {}
+    phase_strong_counts: dict[str, int] = {}
+    phase_weak_counts: dict[str, int] = {}
+
+    for phase, predicate, split_priority, require_internal_candidate in phase_specs:
+        candidates = _priority_v3_candidates(boundaries, current_regions, combined, predicate)
+        phase_candidate_counts[phase] = len(candidates)
+        phase_strong_counts[phase] = sum(1 for boundary in candidates if boundary.boundary_kind == "strong")
+        phase_weak_counts[phase] = sum(1 for boundary in candidates if boundary.boundary_kind == "weak")
+        spans = _solve_priority_regions(
+            audio=audio,
+            sample_rate=sample_rate,
+            chars=chars,
+            regions=current_regions,
+            candidate_boundaries=candidates,
+            phase=phase,
+            split_priority=split_priority,
+            require_internal_candidate=require_internal_candidate,
+            min_seg_sec=min_seg_sec,
+            max_seg_sec=max_seg_sec,
+            trim_cache=trim_cache,
+        )
+        solved_spans.extend(spans)
+        current_regions = _subtract_priority_spans(current_regions, spans, chars)
+
+    solved_spans = sorted(
+        solved_spans,
+        key=lambda span: (span.start_token_idx, span.end_boundary.token_idx),
+    )
+    all_spans: list[_PrioritySpan] = []
+    for region in must_regions:
+        region_spans = [
+            span
+            for span in solved_spans
+            if region.start_token_idx <= span.start_token_idx <= span.end_boundary.token_idx <= region.end_boundary.token_idx
+        ]
+        all_spans.extend(
+            _priority_leftover_spans(
+                audio=audio,
+                sample_rate=sample_rate,
+                chars=chars,
+                region_start_token_idx=region.start_token_idx,
+                region_end_boundary=region.end_boundary,
+                chosen_spans=region_spans,
+                min_seg_sec=min_seg_sec,
+                max_seg_sec=max_seg_sec,
+                trim_cache=trim_cache,
+            )
+        )
+
+    segments = [
+        _priority_span_to_segment(span, chars, strategy="priority_silence_v3")
+        for span in all_spans
+    ]
+    chosen_cuts = [
+        _priority_span_to_cut(span, strategy="priority_silence_v3")
+        for span in all_spans
+    ]
+    meta = {
+        "priority_v3_combined_sample_count": int(combined.count),
+        "priority_v3_combined_is_fallback": bool(combined.is_fallback),
+        "priority_v3_combined_p40_ms": float(combined.p40_ms),
+        "priority_v3_combined_p60_ms": float(combined.p60_ms),
+        "priority_v3_combined_p80_ms": float(combined.p80_ms),
+        "priority_v3_must_cut_boundary_count": len(must_boundaries),
+    }
+    for phase in phase_candidate_counts:
+        meta[f"priority_v3_{phase}_candidate_count"] = phase_candidate_counts[phase]
+        meta[f"priority_v3_{phase}_strong_candidate_count"] = phase_strong_counts[phase]
+        meta[f"priority_v3_{phase}_weak_candidate_count"] = phase_weak_counts[phase]
+    return segments, chosen_cuts, None, meta
+
+
 def _choose_dp_strategy_2_spans(
     *,
     audio: np.ndarray,
@@ -1558,6 +1737,16 @@ def _plan_segments(
             min_seg_sec=min_seg_sec,
             max_seg_sec=max_seg_sec,
         )
+    if strategy == "priority_silence_v3":
+        return _plan_segments_priority_silence_v3(
+            audio=audio,
+            sample_rate=sample_rate,
+            prepass=prepass,
+            chars=chars,
+            boundaries=boundaries,
+            min_seg_sec=min_seg_sec,
+            max_seg_sec=max_seg_sec,
+        )
     if strategy == "dp_strategy_2":
         return _plan_segments_dp_strategy_2(
             audio=audio,
@@ -1634,6 +1823,11 @@ async def run_rough_cut_phase(
     )
     result.segments.extend(segments)
 
+    priority_v3_combined = (
+        _priority_v3_combined_percentiles(boundaries)
+        if strategy == "priority_silence_v3"
+        else None
+    )
     response_cuts = []
     for boundary in boundaries:
         cut = {
@@ -1646,10 +1840,19 @@ async def run_rough_cut_phase(
             "pause_ms": boundary.pause_ms,
             "reason": boundary.reason,
         }
-        if strategy in {"priority_silence_v1", "priority_silence_v2"}:
+        if strategy in {"priority_silence_v1", "priority_silence_v2", "priority_silence_v3"}:
             cut["strategy_cut_policy"] = _priority_boundary_policy(boundary, prepass)
             if strategy == "priority_silence_v2":
                 cut["strategy_v2_legal_cut"] = _priority_v2_legal_cut(boundary, prepass)
+            if strategy == "priority_silence_v3" and priority_v3_combined is not None:
+                cut["strategy_cut_policy"] = _priority_v3_boundary_policy(boundary, priority_v3_combined)
+                cut["strategy_v3_combined_p40_cut"] = _priority_v3_p40_cut(boundary, priority_v3_combined)
+                cut["strategy_v3_combined_p60_cut"] = _priority_v3_p60_cut(boundary, priority_v3_combined)
+                cut["strategy_v3_combined_p60_strong_cut"] = _priority_v3_strong_p60_cut(
+                    boundary,
+                    priority_v3_combined,
+                )
+                cut["strategy_v3_must_cut"] = _priority_v3_must_cut(boundary, priority_v3_combined)
         elif strategy == "dp_strategy_2":
             cut["strategy_cut_policy"] = (
                 "must_cut"
@@ -1687,7 +1890,13 @@ async def run_rough_cut_phase(
                 **(
                     {
                         "priority_must_cut_boundary_count": sum(
-                            1 for b in boundaries if _priority_must_cut(b, prepass)
+                            1
+                            for b in boundaries
+                            if (
+                                _priority_v3_must_cut(b, priority_v3_combined)
+                                if strategy == "priority_silence_v3" and priority_v3_combined is not None
+                                else _priority_must_cut(b, prepass)
+                            )
                         ),
                         "priority_good_cut_boundary_count": sum(
                             1
@@ -1695,14 +1904,22 @@ async def run_rough_cut_phase(
                             if (
                                 _priority_v2_good_cut(b, prepass)
                                 if strategy == "priority_silence_v2"
+                                else _priority_v3_strong_p60_cut(b, priority_v3_combined)
+                                if strategy == "priority_silence_v3" and priority_v3_combined is not None
                                 else _priority_good_cut(b, prepass)
                             )
                         ),
                         "priority_valid_cut_boundary_count": sum(
-                            1 for b in boundaries if _priority_valid_cut(b, prepass)
+                            1
+                            for b in boundaries
+                            if (
+                                _priority_v3_p40_cut(b, priority_v3_combined)
+                                if strategy == "priority_silence_v3" and priority_v3_combined is not None
+                                else _priority_valid_cut(b, prepass)
+                            )
                         ),
                     }
-                    if strategy in {"priority_silence_v1", "priority_silence_v2"}
+                    if strategy in {"priority_silence_v1", "priority_silence_v2", "priority_silence_v3"}
                     else {}
                 ),
                 **planner_meta,

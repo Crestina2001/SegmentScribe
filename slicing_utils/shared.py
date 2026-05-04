@@ -15,12 +15,15 @@ from .asr import CharToken
 
 STRONG_STOPS = frozenset("。？！.?!")
 WEAK_STOPS = frozenset("，；、,;:")
+NON_PUNCT_BRACKETS = frozenset("<>()《》（）")
 
 
 def is_punct_or_space(ch: str) -> bool:
-    """True for whitespace and any Unicode punctuation / symbol."""
+    """True for whitespace and punctuation/symbols, excluding text brackets."""
     if ch.isspace():
         return True
+    if ch in NON_PUNCT_BRACKETS:
+        return False
     cat = unicodedata.category(ch)
     return cat.startswith("P") or cat.startswith("S")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -27,11 +28,24 @@ def _stats(
 
 
 def _chars(text: str) -> list[CharToken]:
-    return [
-        CharToken(idx=idx, char=ch, start_sec=idx * 0.5, end_sec=idx * 0.5 + 0.4)
-        for idx, ch in enumerate(text)
-        if ch not in "，。"
-    ]
+    chars: list[CharToken] = []
+    for text_pos, ch in enumerate(text):
+        if ch in ",.":
+            continue
+        idx = len(chars)
+        chars.append(CharToken(idx=idx, char=ch, start_sec=idx * 0.5, end_sec=idx * 0.5 + 0.4))
+    return chars
+
+
+def _mapping_for_ascii_punctuated_text(text: str) -> dict[int, list[int]]:
+    mapping: dict[int, list[int]] = {}
+    token_idx = 0
+    for text_pos, ch in enumerate(text):
+        if ch in ",.":
+            continue
+        mapping[token_idx] = [text_pos]
+        token_idx += 1
+    return mapping
 
 
 def _prepass(text: str, *, pauses: dict[int, float] | None = None) -> FullPrepass:
@@ -53,7 +67,7 @@ def _boundary(token_idx: int, *, kind: str, pause_ms: float, label: str = "ok") 
         candidate_id=token_idx,
         token_idx=token_idx,
         text_pos=token_idx,
-        boundary_text="<final>" if kind == "final" else "，",
+        boundary_text="<final>" if kind == "final" else ",",
         boundary_kind=kind,
         quality=label,
         cut_policy="normal",
@@ -71,7 +85,7 @@ def _patch_raw_duration_estimator(monkeypatch):
     monkeypatch.setattr(shared_rough_cut, "_estimate_trimmed_duration_sec", raw_duration)
 
 
-def test_slide_llm_cli_defaults_to_classifier_strategy_and_disabled_punctuation(tmp_path):
+def test_slide_llm_cli_defaults_to_classifier_strategy_and_disabled_punctuation(tmp_path: Path):
     parser = build_parser()
     args = parser.parse_args(
         [
@@ -90,10 +104,10 @@ def test_slide_llm_cli_defaults_to_classifier_strategy_and_disabled_punctuation(
     cfg = args_to_config(args)
 
     assert cfg.enable_punctuation_correction is False
-    assert cfg.rough_cut_strategy == "llm_pause_priority_silence_v2"
+    assert cfg.rough_cut_strategy == "llm_slice_v1"
 
 
-def test_slide_llm_cli_accepts_punctuation_and_legacy_tool_strategy(tmp_path):
+def test_slide_llm_cli_accepts_punctuation_and_legacy_tool_strategy(tmp_path: Path):
     parser = build_parser()
     args = parser.parse_args(
         [
@@ -119,38 +133,42 @@ def test_slide_llm_cli_accepts_punctuation_and_legacy_tool_strategy(tmp_path):
 
 
 def test_identity_punctuation_result_preserves_text_and_mapping():
-    prepass = _prepass("甲，乙。")
+    prepass = _prepass("a,b.")
 
     result = _identity_punctuation_result(prepass)
 
-    assert result.corrected_full_text == "甲，乙。"
+    assert result.corrected_full_text == "a,b."
     assert result.applied_windows == []
     assert result.corrected_token_to_positions == {0: [0], 1: [2]}
 
 
-def test_grouped_classifier_prompt_indexes_targets_but_not_padding():
-    text = "甲，乙，丙，丁，戊，己，庚。"
+def test_grouped_classifier_prompt_indexes_five_target_sentences_not_five_boundaries():
+    text = "a,b.c,d.e,f.g,h.i,j.k,l.m,n."
     prepass = _prepass(text)
-    mapping = {idx: [idx * 2] for idx in range(7)}
+    mapping = _mapping_for_ascii_punctuated_text(text)
     boundaries = shared_rough_cut._extract_punctuation_boundaries(text, mapping, prepass.global_chars, prepass)
-    target_boundaries = [b for b in boundaries if b.boundary_kind != "final"][1:6]
+    sentences = rough_cut._pause_classification_sentences(boundaries)
 
     prompt, marker_map = rough_cut._build_pause_classification_prompt(
         corrected_full_text=text,
         corrected_token_to_positions=mapping,
         prepass=prepass,
-        all_boundaries=boundaries,
-        target_boundaries=target_boundaries,
-        punctuation_start_index=1,
+        sentences=sentences,
+        target_sentences=sentences[1:6],
     )
 
-    assert prompt["target_markers"] == [1, 2, 3, 4, 5]
-    assert "[1]乙，" in prompt["text"]
-    assert "[5]己，" in prompt["text"]
-    assert prompt["text"].startswith("甲，")
-    assert "庚" not in prompt["text"]
-    assert marker_map[1].token_idx == 1
-    assert marker_map[5].token_idx == 5
+    assert prompt["target_sentence_indices"] == [1, 2, 3, 4, 5]
+    assert prompt["target_markers"] == list(range(1, 11))
+    assert prompt["text"].startswith("a,b.")
+    assert "[1]c," in prompt["text"]
+    assert "[2]d." in prompt["text"]
+    assert "[9]k," in prompt["text"]
+    assert "[10]l." in prompt["text"]
+    assert prompt["text"].endswith("m,n.")
+    assert "[1]a," not in prompt["text"]
+    assert "[11]m," not in prompt["text"]
+    assert marker_map[1].token_idx == 2
+    assert marker_map[10].token_idx == 11
 
 
 def test_pause_label_validation_accepts_exact_good_ok_bad_set():
@@ -217,3 +235,52 @@ def test_llm_pause_priority_planner_uses_labeled_steps(monkeypatch):
     ]
     assert [cut["llm_pause_label"] for cut in cuts] == ["good", "ok", "final"]
     assert meta["llm_pause_step2_candidate_count"] == 1
+
+
+def test_llm_tool_prompt_uses_pause_classes_and_ranks_without_statistics():
+    text = "a,b."
+    prepass = _prepass(text)
+    mapping = _mapping_for_ascii_punctuated_text(text)
+    boundaries = [
+        rough_cut.CandidateBoundary(
+            token_idx=0,
+            text_pos=0,
+            boundary_text=",",
+            boundary_kind="weak",
+            pause_ms=100.0,
+            cut_sec=0.4,
+            middle_sec=0.5,
+        )
+    ]
+
+    prompt = rough_cut._prompt_summary(
+        prepass=prepass,
+        corrected_full_text=text,
+        corrected_token_to_positions=mapping,
+        boundaries=boundaries,
+        start_idx=0,
+        min_seg_sec=3.0,
+        max_seg_sec=10.0,
+        pause_rankings=rough_cut._pause_prompt_rankings(boundaries),
+    )
+
+    assert "statistics" not in prompt
+    assert "100ms" not in prompt["text_with_cut_markers"]
+    assert "[1: 0.5s: very long pause]" in prompt["text_with_cut_markers"]
+
+
+def test_pause_prompt_labels_use_mixed_weak_and_strong_rank_buckets_without_rank_text():
+    prepass = _prepass("abcdef.")
+    boundaries = [
+        _boundary(1, kind="weak", pause_ms=40.0),
+        _boundary(2, kind="weak", pause_ms=201.0),
+        _boundary(3, kind="strong", pause_ms=90.0),
+        _boundary(4, kind="strong", pause_ms=301.0),
+    ]
+    rankings = rough_cut._pause_prompt_rankings(boundaries)
+
+    assert rough_cut._pause_class_label(201.0, prepass, rankings[2]) == "long pause"
+    assert rough_cut._pause_prompt_label(boundaries[1], prepass, rankings) == "long pause"
+    assert rough_cut._pause_prompt_label(boundaries[0], prepass, rankings) == "very short pause"
+    assert rough_cut._pause_prompt_label(boundaries[3], prepass, rankings) == "very long pause"
+    assert rough_cut._pause_prompt_label(boundaries[2], prepass, rankings) == "short pause"

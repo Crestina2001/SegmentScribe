@@ -330,8 +330,11 @@ python -m slide_LLM \
 - `--enable-punctuation-correction`: 启用 LLM 标点修正；默认关闭。
 - `--punct-llm-model`: 可选，启用标点修正时只覆盖标点修正阶段。
 - `--rough-llm-model`: 可选，只覆盖粗切分阶段。
-- `--rough-cut-strategy`: 粗切分策略，默认 `llm_pause_priority_silence_v2`；
-  `llm_tool` 可使用旧的 tool-calling 粗切分流程。
+- `--rough-cut-strategy`: 粗切分策略，默认 `llm_slice_v1`；
+  `llm_tool` 可使用旧的 tool-calling 粗切分流程；也可显式选择
+  `priority_silence_v3` 等确定性策略。
+  在 `scripts/run_full_pipeline.sh` 中，`SLICE_MODE=llm` 使用
+  `LLM_ROUGH_CUT_STRATEGY`；`ROUGH_CUT_STRATEGY` 仅用于 `SLICE_MODE=rule`。
 - `--llm-provider`: 可选；省略时 gateway 会尝试从模型名推断 provider。
 - `--env-path`: 可选，指定包含 provider key 的 `.env` 文件。
 - `--llm-max-rounds`: 粗切分长度错误后的最大修复轮数，默认 `5`。

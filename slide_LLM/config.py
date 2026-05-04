@@ -20,7 +20,7 @@ class LLMWorkflowConfig:
     punct_llm_model: Optional[str] = None
     rough_llm_model: Optional[str] = None
     enable_punctuation_correction: bool = False
-    rough_cut_strategy: str = "llm_pause_priority_silence_v2"
+    rough_cut_strategy: str = "llm_slice_v1"
     llm_provider: Optional[ProviderName] = None
     env_path: Optional[str] = None
     llm_max_rounds: int = 5

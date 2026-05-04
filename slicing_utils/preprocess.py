@@ -367,6 +367,8 @@ def _quantiles(samples_ms: Sequence[float]) -> PausePercentiles:
 def _is_punctuation_or_space(ch: str) -> bool:
     if ch.isspace():
         return True
+    if ch in "<>()《》（）":
+        return False
     cat = unicodedata.category(ch)
     return cat.startswith("P") or cat.startswith("S")
 

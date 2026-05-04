@@ -60,9 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vad-speech-pad-ms", type=int, default=200)
     parser.add_argument(
         "--rough-cut-strategy",
-        default="priority_silence_v2",
-        choices=("legacy_dp", "priority_silence_v1", "priority_silence_v2", "dp_strategy_2"),
-        help="Rough-cut planner strategy. Default: priority_silence_v2.",
+        default="priority_silence_v3",
+        choices=("legacy_dp", "priority_silence_v1", "priority_silence_v2", "priority_silence_v3", "dp_strategy_2"),
+        help="Rough-cut planner strategy. Default: priority_silence_v3.",
     )
     parser.add_argument(
         "--enable-punctuation-correction",

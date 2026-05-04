@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import inspect
+import json
 import base64
 import mimetypes
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .concurrency import ConcurrencyController
 from .config import GatewayConfig, load_gateway_config
 from .memory_manager import MemoryManager
-from .models import PromptRequest, PromptResponse, ProviderName, ToolDefinition
+from .models import PromptRequest, PromptResponse, ProviderName, Tool, ToolCall, ToolDefinition
 from .providers import AnthropicAdapter, BaseProviderAdapter, DeepSeekAdapter, GeminiAdapter, MiniMaxAdapter, OpenAIAdapter
 from .retry import execute_with_retry
 from .telemetry import LangfuseTracer
@@ -39,7 +42,7 @@ class UnifiedClient:
         top_p: float | None = None,
         response_format: dict[str, Any] | None = None,
         images: list[str] | None = None,
-        tools: list[ToolDefinition | dict[str, Any]] | None = None,
+        tools: list[Tool | ToolDefinition | dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -123,6 +126,104 @@ class UnifiedClient:
             model=request.model,
             payload=payload,
         )
+
+    async def send_prompt_autoTC(
+        self,
+        memory_manager: MemoryManager,
+        user_prompt: str | None = None,
+        *,
+        conversation_messages: list[dict[str, Any]] | None = None,
+        provider: ProviderName | None = None,
+        model: str,
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        response_format: dict[str, Any] | None = None,
+        images: list[str] | None = None,
+        tools: list[Tool] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        max_tool_rounds: int = 5,
+        metadata: dict[str, Any] | None = None,
+        trace_name: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> PromptResponse:
+        if output_schema is not None:
+            raise ValueError("send_prompt_autoTC does not support output_schema because it uses tools internally.")
+        if max_tool_rounds < 0:
+            raise ValueError("max_tool_rounds must be greater than or equal to 0.")
+
+        tools = tools or []
+        tool_registry = self._build_tool_registry(tools)
+        provider_name = self.config.resolve_provider(model=model, provider=provider)
+        request = self._build_request(
+            memory_manager=memory_manager,
+            user_prompt=user_prompt,
+            conversation_messages=conversation_messages,
+            provider_name=provider_name,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            response_format=response_format,
+            images=images,
+            tools=tools,
+            tool_choice=tool_choice,
+            output_schema=None,
+            metadata=metadata,
+            trace_name=trace_name,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        adapter = self._get_adapter(provider_name)
+        messages = [dict(message) for message in request.messages]
+        turn_messages: list[dict[str, Any]] = []
+        prompt = (user_prompt or "").strip()
+        if conversation_messages is None and prompt:
+            turn_messages.append({"role": "user", "content": prompt})
+        elif conversation_messages is None and images is not None:
+            built_user = messages[-1] if messages and messages[-1].get("role") == "user" else None
+            if built_user is not None:
+                turn_messages.append(dict(built_user))
+
+        for tool_round in range(max_tool_rounds + 1):
+            round_request = replace(request, messages=messages)
+            payload = adapter.prepare_request(round_request)
+            raw_response = await self._send_traced(
+                adapter=adapter,
+                request=round_request,
+                payload=payload,
+                metadata=metadata,
+            )
+            parsed = adapter.parse_response(raw_response)
+            assistant_message = self._assistant_message_from_raw(raw_response)
+
+            if not parsed.tool_calls:
+                if assistant_message is not None:
+                    turn_messages.append(self.tool_manager.assistant_message_for_memory(assistant_message))
+                if conversation_messages is None and memory_manager.stateful:
+                    for message in turn_messages:
+                        memory_manager.append_message(message)
+                return parsed
+
+            if tool_round >= max_tool_rounds:
+                raise RuntimeError(f"Maximum tool-call rounds exceeded: {max_tool_rounds}")
+
+            if assistant_message is None:
+                assistant_message = self._assistant_message_from_response(parsed)
+            assistant_for_memory = self.tool_manager.assistant_message_for_memory(assistant_message)
+            messages.append(assistant_for_memory)
+            turn_messages.append(dict(assistant_for_memory))
+
+            for call in parsed.tool_calls:
+                tool_message = await self._tool_result_message(call, tool_registry)
+                messages.append(tool_message)
+                turn_messages.append(dict(tool_message))
+
+        raise RuntimeError(f"Maximum tool-call rounds exceeded: {max_tool_rounds}")
 
     async def close(self) -> None:
         for adapter in self._adapters.values():
@@ -213,7 +314,7 @@ class UnifiedClient:
         top_p: float | None,
         response_format: dict[str, Any] | None,
         images: list[str] | None,
-        tools: list[ToolDefinition | dict[str, Any]] | None,
+        tools: list[Tool | ToolDefinition | dict[str, Any]] | None,
         tool_choice: str | dict[str, Any] | None,
         output_schema: dict[str, Any] | None,
         metadata: dict[str, Any] | None,
@@ -263,7 +364,7 @@ class UnifiedClient:
     def _resolve_tooling(
         self,
         *,
-        tools: list[ToolDefinition | dict[str, Any]] | None,
+        tools: list[Tool | ToolDefinition | dict[str, Any]] | None,
         tool_choice: str | dict[str, Any] | None,
         output_schema: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]] | None, str | dict[str, Any] | None]:
@@ -282,6 +383,95 @@ class UnifiedClient:
             self.tool_manager.normalize_definitions(tools),
             self.tool_manager.normalize_choice(tool_choice),
         )
+
+    @staticmethod
+    def _build_tool_registry(tools: list[Tool]) -> dict[str, Tool]:
+        registry: dict[str, Tool] = {}
+        for tool in tools:
+            if not isinstance(tool, Tool):
+                raise ValueError("send_prompt_autoTC tools must be Tool instances.")
+            name = tool.name.strip()
+            if not name:
+                raise ValueError("Tool name cannot be empty.")
+            if name in registry:
+                raise ValueError(f"Duplicate tool name: {name}")
+            registry[name] = tool
+        return registry
+
+    async def _tool_result_message(self, call: ToolCall, tool_registry: dict[str, Tool]) -> dict[str, Any]:
+        tool = tool_registry.get(call.name)
+        if tool is None:
+            content = self._tool_error_content(
+                tool=call.name,
+                error=f"Unknown tool: {call.name}",
+                error_type="ToolExecutionError",
+            )
+        else:
+            try:
+                result = tool.func(**call.arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+                content = self._serialize_tool_result(tool, result)
+            except Exception as exc:
+                content = self._tool_error_content(
+                    tool=call.name,
+                    error=str(exc),
+                    error_type="ToolExecutionError",
+                )
+        return {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": content,
+        }
+
+    @staticmethod
+    def _serialize_tool_result(tool: Tool, result: Any) -> str:
+        if tool.serialize is not None:
+            serialized = tool.serialize(result)
+            return serialized if isinstance(serialized, str) else str(serialized)
+        if isinstance(result, str):
+            return result
+        return json.dumps(result, ensure_ascii=False)
+
+    @staticmethod
+    def _tool_error_content(*, tool: str, error: str, error_type: str) -> str:
+        return json.dumps(
+            {
+                "error": error,
+                "tool": tool,
+                "type": error_type,
+            },
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _assistant_message_from_raw(raw_response: dict[str, Any]) -> dict[str, Any] | None:
+        choices = raw_response.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return None
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            return None
+        message = first_choice.get("message")
+        return dict(message) if isinstance(message, dict) else None
+
+    @staticmethod
+    def _assistant_message_from_response(response: PromptResponse) -> dict[str, Any]:
+        return {
+            "role": "assistant",
+            "content": response.text or "",
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.raw_arguments if call.raw_arguments is not None else json.dumps(call.arguments),
+                    },
+                }
+                for call in response.tool_calls
+            ],
+        }
 
     def _build_image_content(self, *, user_prompt: str | None, images: list[str]) -> list[dict[str, Any]]:
         if not isinstance(images, list):

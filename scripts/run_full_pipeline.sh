@@ -215,7 +215,7 @@ if is_true "${DO_SLICE:-true}"; then
     COMMAND+=(--language "${LANGUAGE}")
   fi
   if [[ "${SLICE_MODULE}" == "slide_rule" ]]; then
-    COMMAND+=(--rough-cut-strategy "${ROUGH_CUT_STRATEGY:-priority_silence_v2}")
+    COMMAND+=(--rough-cut-strategy "${ROUGH_CUT_STRATEGY:-priority_silence_v3}")
     append_flag_if_true "${ENABLE_PUNCTUATION_CORRECTION:-false}" "--enable-punctuation-correction"
   else
     if [[ -z "${LLM_MODEL:-}" ]]; then
@@ -223,7 +223,7 @@ if is_true "${DO_SLICE:-true}"; then
       exit 2
     fi
     COMMAND+=(--llm-model "${LLM_MODEL}")
-    COMMAND+=(--rough-cut-strategy "${ROUGH_CUT_STRATEGY:-llm_pause_priority_silence_v2}")
+    COMMAND+=(--rough-cut-strategy "${LLM_ROUGH_CUT_STRATEGY:-llm_slice_v1}")
     COMMAND+=(--llm-concurrency "${LLM_CONCURRENCY:-8}")
     COMMAND+=(--llm-max-rounds "${LLM_MAX_ROUNDS:-5}")
     append_flag_if_true "${ENABLE_PUNCTUATION_CORRECTION:-false}" "--enable-punctuation-correction"
