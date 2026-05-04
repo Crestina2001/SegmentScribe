@@ -114,138 +114,6 @@ class WindowTranscript:
     duration_sec: float
 
 
-class ForcedAlignerBackend:
-    """Alignment-only wrapper with its own forced-aligner model instance."""
-
-    def __init__(
-        self,
-        *,
-        forced_aligner_cls: Any,
-        aligner_path: str,
-        forced_aligner_kwargs: dict[str, Any],
-        max_aligner_batch_size: int,
-        language: Optional[str],
-        sample_rate: int,
-        worker_index: int = 1,
-    ) -> None:
-        self.max_aligner_batch_size = max(1, int(max_aligner_batch_size))
-        self.language = language
-        self.sample_rate = sample_rate
-        self.worker_index = worker_index
-        logger.info(
-            "Loading Qwen3 forced aligner worker %d: %s",
-            worker_index,
-            aligner_path,
-        )
-        self._forced_aligner = forced_aligner_cls.from_pretrained(
-            aligner_path,
-            **dict(forced_aligner_kwargs),
-        )
-
-    def align_window_transcripts(
-        self,
-        windows: Sequence[tuple[np.ndarray, int]],
-        transcripts: Sequence[Any],
-    ) -> list[WindowTranscript]:
-        prepared, durations = self._prepare_windows(windows)
-        results = [_AsrOnlyResult(text=tr.text, language=tr.language) for tr in transcripts]
-        alignments = self._align_transcripts(prepared, results)
-        return _build_transcripts(results, alignments, durations)
-
-    def _prepare_windows(
-        self,
-        windows: Sequence[tuple[np.ndarray, int]],
-    ) -> tuple[list[tuple[np.ndarray, int]], list[float]]:
-        prepared: list[tuple[np.ndarray, int]] = []
-        durations: list[float] = []
-        for audio, sample_rate in windows:
-            if audio.ndim != 1:
-                raise ValueError(f"Expected mono audio, got shape {audio.shape}.")
-            if sample_rate != self.sample_rate:
-                raise ValueError(
-                    f"ForcedAlignerBackend expects {self.sample_rate} Hz audio, got {sample_rate} Hz."
-                )
-            if audio.dtype != np.float32:
-                audio = audio.astype(np.float32, copy=False)
-            prepared.append((audio, sample_rate))
-            durations.append(float(len(audio) / sample_rate) if sample_rate > 0 else 0.0)
-        return prepared, durations
-
-    def _align_transcripts(
-        self,
-        prepared: Sequence[tuple[np.ndarray, int]],
-        results: Sequence[Any],
-    ) -> list[Any | None]:
-        pending_audio: list[tuple[np.ndarray, int]] = []
-        pending_text: list[str] = []
-        pending_language: list[str] = []
-        pending_indices: list[int] = []
-        alignments: list[Any | None] = [None] * len(results)
-
-        for index, ((audio, sample_rate), result) in enumerate(zip(prepared, results)):
-            text = str(getattr(result, "text", "") or "")
-            if not text.strip():
-                continue
-            language = str(getattr(result, "language", "") or self.language or "")
-            pending_audio.append((audio, sample_rate))
-            pending_text.append(text)
-            pending_language.append(language)
-            pending_indices.append(index)
-
-        if not pending_audio:
-            return alignments
-
-        batch_size = max(1, int(self.max_aligner_batch_size or 1))
-        jobs = sorted(
-            zip(pending_indices, pending_audio, pending_text, pending_language),
-            key=lambda item: len(item[1][0]),
-        )
-        for offset in range(0, len(jobs), batch_size):
-            job_batch = jobs[offset : offset + batch_size]
-            index_batch = [item[0] for item in job_batch]
-            audio_batch = [item[1] for item in job_batch]
-            text_batch = [item[2] for item in job_batch]
-            language_batch = [item[3] for item in job_batch]
-            aligned_batch = self._forced_aligner.align(
-                audio=audio_batch,
-                text=text_batch,
-                language=language_batch,
-            )
-            for index, alignment in zip(index_batch, aligned_batch):
-                alignments[index] = alignment
-        return alignments
-
-
-def _build_transcripts(
-    results: Sequence[Any],
-    alignments: Sequence[Any | None],
-    durations: Sequence[float],
-) -> list[WindowTranscript]:
-    transcripts: list[WindowTranscript] = []
-    for result, alignment, duration_sec in zip(results, alignments, durations):
-        chars: list[CharToken] = []
-        time_stamps = alignment
-        items = list(time_stamps) if time_stamps is not None else []
-        for idx, item in enumerate(items):
-            chars.append(
-                CharToken(
-                    idx=idx,
-                    char=str(item.text),
-                    start_sec=float(item.start_time),
-                    end_sec=float(item.end_time),
-                )
-            )
-        transcripts.append(
-            WindowTranscript(
-                text=str(result.text or ""),
-                language=str(result.language or ""),
-                chars=chars,
-                duration_sec=duration_sec,
-            )
-        )
-    return transcripts
-
-
 class AsrBackend:
     """Loads Qwen3-ASR with forced alignment and transcribes short windows."""
 
@@ -392,18 +260,29 @@ class AsrBackend:
         alignments: Sequence[Any | None],
         durations: Sequence[float],
     ) -> list[WindowTranscript]:
-        return _build_transcripts(results, alignments, durations)
-
-    def create_aligner_worker(self, *, worker_index: int = 1) -> ForcedAlignerBackend:
-        return ForcedAlignerBackend(
-            forced_aligner_cls=self._forced_aligner_cls,
-            aligner_path=self._forced_aligner_path,
-            forced_aligner_kwargs=self._forced_aligner_kwargs,
-            max_aligner_batch_size=self.max_aligner_batch_size,
-            language=self.language,
-            sample_rate=self.sample_rate,
-            worker_index=worker_index,
-        )
+        transcripts: list[WindowTranscript] = []
+        for result, alignment, duration_sec in zip(results, alignments, durations):
+            chars: list[CharToken] = []
+            time_stamps = alignment
+            items = list(time_stamps) if time_stamps is not None else []
+            for idx, item in enumerate(items):
+                chars.append(
+                    CharToken(
+                        idx=idx,
+                        char=str(item.text),
+                        start_sec=float(item.start_time),
+                        end_sec=float(item.end_time),
+                    )
+                )
+            transcripts.append(
+                WindowTranscript(
+                    text=str(result.text or ""),
+                    language=str(result.language or ""),
+                    chars=chars,
+                    duration_sec=duration_sec,
+                )
+            )
+        return transcripts
 
     def _align_transcripts(
         self,

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from llm_gateway import UnifiedClient
 from slicing_utils.asr import AsrBackend
@@ -29,10 +30,11 @@ from slicing_utils.filter_write import (
     write_voxcpm_jsonl,
 )
 from slicing_utils.prepass import (
-    AsyncPrepassScheduler,
+    AsrChunkDraft,
     FullPrepass,
     RmsSilenceConfig,
     VadConfig,
+    align_draft_chunk_windows,
     assemble_full_prepass,
     prepare_full_prepass_plan,
 )
@@ -77,6 +79,126 @@ class PooledLLMClient:
         await self._client.close()
 
 
+@dataclass
+class _AsrChunkRequest:
+    audio: np.ndarray
+    sample_rate: int
+    span: tuple[int, int]
+    source_label: str
+    chunk_index: int
+    source_total_chunks: int
+    future: asyncio.Future[AsrChunkDraft]
+
+
+class AsrBatcher:
+    _BATCH_FILL_DELAY_SEC = 0.01
+
+    def __init__(self, asr_backend: AsrBackend, *, max_batch_size: int) -> None:
+        self._asr_backend = asr_backend
+        self._max_batch_size = max(1, int(max_batch_size))
+        self._queue: asyncio.Queue[_AsrChunkRequest | None] = asyncio.Queue()
+        self._worker: asyncio.Task[None] | None = None
+        self._progress = None
+
+    def start(self) -> None:
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._run())
+
+    async def close(self) -> None:
+        if self._worker is None:
+            return
+        await self._queue.put(None)
+        await self._worker
+        self._worker = None
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
+
+    async def transcribe_source(
+        self,
+        *,
+        source_label: str,
+        audio: np.ndarray,
+        sample_rate: int,
+        chunks: Sequence[tuple[int, int]],
+    ) -> list[AsrChunkDraft]:
+        if not chunks:
+            return []
+        loop = asyncio.get_running_loop()
+        requests: list[_AsrChunkRequest] = []
+        total_chunks = len(chunks)
+        self._ensure_progress(total_chunks)
+        for chunk_index, (start, end) in enumerate(chunks, start=1):
+            request = _AsrChunkRequest(
+                audio=np.ascontiguousarray(audio[start:end], dtype=np.float32),
+                sample_rate=sample_rate,
+                span=(start, end),
+                source_label=source_label,
+                chunk_index=chunk_index,
+                source_total_chunks=total_chunks,
+                future=loop.create_future(),
+            )
+            requests.append(request)
+            await self._queue.put(request)
+        return list(await asyncio.gather(*(request.future for request in requests)))
+
+    async def _run(self) -> None:
+        while True:
+            first = await self._queue.get()
+            if first is None:
+                return
+            batch = [first]
+            await asyncio.sleep(self._BATCH_FILL_DELAY_SEC)
+            while len(batch) < self._max_batch_size:
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is None:
+                    await self._queue.put(None)
+                    break
+                batch.append(item)
+            await self._process_batch(batch)
+
+    async def _process_batch(self, batch: Sequence[_AsrChunkRequest]) -> None:
+        windows = [(request.audio, request.sample_rate) for request in batch]
+        try:
+            transcripts = await asyncio.to_thread(self._asr_backend.transcribe_windows_asr_only, windows)
+        except Exception as exc:
+            logger.warning("Batched ASR failed for %d chunk(s): %s", len(batch), exc)
+            transcripts = []
+        drafts: list[AsrChunkDraft] = []
+        for index, request in enumerate(batch):
+            if index < len(transcripts):
+                tr = transcripts[index]
+                drafts.append(
+                    AsrChunkDraft(
+                        text=str(tr.text or ""),
+                        language=str(tr.language or ""),
+                        span=request.span,
+                    )
+                )
+            else:
+                drafts.append(AsrChunkDraft(text="", language="", span=request.span))
+        for request, result in zip(batch, drafts):
+            if not request.future.done():
+                request.future.set_result(result)
+        if self._progress is not None:
+            self._progress.update(len(batch))
+
+    def _ensure_progress(self, added_total: int) -> None:
+        if self._progress is None:
+            self._progress = tqdm(
+                total=0,
+                desc="Qwen3-ASR",
+                unit="win",
+                dynamic_ncols=True,
+                leave=False,
+            )
+        self._progress.total = int(self._progress.total or 0) + int(added_total)
+        self._progress.refresh()
+
+
 class SlideLLMPipeline:
     def __init__(self, config: LLMWorkflowConfig) -> None:
         self.config = config
@@ -93,12 +215,7 @@ class SlideLLMPipeline:
             backend_kwargs=config.asr_backend_kwargs,
             forced_aligner_kwargs=config.forced_aligner_kwargs,
         )
-        self.prepass_scheduler = AsyncPrepassScheduler(
-            self.asr_backend,
-            asr_max_batch_size=config.asr_max_batch_size,
-            aligner_num_workers=config.aligner_num_workers,
-            aligner_max_batch_size=config.aligner_max_batch_size,
-        )
+        self.asr_batcher = AsrBatcher(self.asr_backend, max_batch_size=config.asr_max_batch_size)
         self._raw_llm_client = UnifiedClient(env_path=config.env_path)
         self.llm_client = PooledLLMClient(self._raw_llm_client, self.llm_pool)
 
@@ -107,16 +224,13 @@ class SlideLLMPipeline:
         workflow_started = time.perf_counter()
         logger.info(
             "Starting slide_LLM: input=%s output_dir=%s asr_backend=%s llm_model=%s "
-            "asr_batch=%s aligner_workers=%s aligner_batch=%s source_concurrency=%s "
-            "chunk_mode=%s segment_bounds=%.2f-%.2fs dry_run=%s overwrite=%s",
+            "asr_batch=%s aligner_batch=%s chunk_mode=%s segment_bounds=%.2f-%.2fs dry_run=%s overwrite=%s",
             cfg.input_path,
             cfg.output_dir,
             cfg.asr_backend,
             cfg.llm_model,
             cfg.asr_max_batch_size,
-            cfg.aligner_num_workers,
             cfg.aligner_max_batch_size,
-            cfg.source_concurrency,
             cfg.preprocess_chunk_mode,
             cfg.min_seg_sec,
             cfg.max_seg_sec,
@@ -131,16 +245,10 @@ class SlideLLMPipeline:
         try:
             _raise_for_duplicate_stems(source_files)
             logger.info("Discovered %d source audio file(s)", len(source_files))
-            self.prepass_scheduler.start()
-            source_gate = asyncio.Semaphore(max(1, cfg.source_concurrency))
-
-            async def run_indexed(path: Path, *, index: int) -> tuple[int, SourceResult]:
-                async with source_gate:
-                    return await self._process_source_indexed(path, index=index, total=len(source_files))
-
+            self.asr_batcher.start()
             tasks = [
                 asyncio.create_task(
-                    run_indexed(path, index=index)
+                    self._process_source_indexed(path, index=index, total=len(source_files))
                 )
                 for index, path in enumerate(source_files, start=1)
             ]
@@ -168,7 +276,7 @@ class SlideLLMPipeline:
             )
             return summary
         finally:
-            await self.prepass_scheduler.close()
+            await self.asr_batcher.close()
             await self.llm_client.close()
 
     async def _process_source_indexed(self, source_path: Path, *, index: int, total: int) -> tuple[int, SourceResult]:
@@ -242,11 +350,21 @@ class SlideLLMPipeline:
                 rms_silence_cfg=rms_silence_cfg,
                 vad_cfg=vad_cfg,
             )
-            transcribed = await self.prepass_scheduler.run_source_prepass(
+            asr_drafts = await self.asr_batcher.transcribe_source(
+                source_label=str(source_path),
                 audio=audio,
                 sample_rate=sr,
                 chunks=plan.chunks,
-                source_label=str(source_path),
+            )
+            windows = [
+                (np.ascontiguousarray(audio[start:end], dtype=np.float32), sr, (start, end))
+                for start, end in plan.chunks
+            ]
+            transcribed = await asyncio.to_thread(
+                align_draft_chunk_windows,
+                windows,
+                asr_drafts,
+                self.asr_backend,
             )
             prepass: FullPrepass = await asyncio.to_thread(
                 assemble_full_prepass,
@@ -558,9 +676,7 @@ class SlideLLMPipeline:
                 "llm_concurrency": cfg.llm_concurrency,
                 "device": cfg.device,
                 "dtype": cfg.dtype,
-                "source_concurrency": cfg.source_concurrency,
                 "asr_max_batch_size": cfg.asr_max_batch_size,
-                "aligner_num_workers": cfg.aligner_num_workers,
                 "aligner_max_batch_size": cfg.aligner_max_batch_size,
                 "min_seg_sec": cfg.min_seg_sec,
                 "max_seg_sec": cfg.max_seg_sec,

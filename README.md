@@ -323,12 +323,6 @@ Useful options:
 - `--enable-punctuation-correction`: enable rule-based punctuation edits.
 - `--rough-cut-strategy`: deterministic rough planner strategy. Default:
   `priority_silence_v3`, a combined strong+weak pause-percentile planner.
-- `--source-concurrency`: maximum source audio files in flight at once
-  (default: `1`).
-- `--asr-max-batch-size`: Qwen3-ASR batch size for the single shared ASR worker.
-- `--aligner-num-workers`: number of forced-aligner model instances
-  (default: `1`).
-- `--aligner-max-batch-size`: forced-aligner batch size per aligner worker.
 
 ## LLM-assisted slicing: slide_LLM
 
@@ -379,22 +373,21 @@ Useful LLM options:
 - `--env-path`: optional path to the `.env` file containing provider keys.
 - `--llm-max-rounds`: max rough-cut repair rounds after a length error
   (default: `5`).
-- `--source-concurrency`: maximum source audio files in flight at once
-  (default: `1`).
-- `--asr-max-batch-size`: Qwen3-ASR batch size for the single shared ASR worker.
-- `--aligner-num-workers`: number of forced-aligner model instances
-  (default: `1`).
-- `--aligner-max-batch-size`: forced-aligner batch size per aligner worker.
+- `--asr-max-batch-size`: maximum number of pre-pass ASR chunks in one global
+  ASR inference batch (default: `1`). When one source has fewer remaining
+  chunks than the batch capacity, chunks from the next ready source can fill the
+  same ASR batch.
 - `--llm-concurrency`: maximum number of `slide_LLM` LLM calls in flight at
   once (default: `8`). The gateway's provider/model/global rate limits still
   apply underneath this cap.
 
 When `--input` is a directory, `slide_LLM` schedules audio files concurrently
-up to `--source-concurrency`. Both `slide_rule` and `slide_LLM` use one shared
-Qwen3-ASR worker, while `--aligner-num-workers` can load multiple forced-aligner
-instances to speed up alignment when VRAM allows. Output directories are keyed
-by source filename stem, so duplicate stems in different subdirectories are
-rejected before processing to avoid trace/audio collisions.
+across a global ASR batcher and an LLM pool. Each source still runs in phase
+order, but ASR batches can be filled with chunks from multiple audios, and one
+file can be in ASR while other files are waiting on punctuation or rough-cut LLM
+calls. Output directories are keyed by source filename stem, so duplicate stems
+in different subdirectories are rejected before processing to avoid trace/audio
+collisions.
 
 ## Final volume normalization(optional)
 

@@ -338,17 +338,15 @@ python -m slide_LLM \
 - `--llm-provider`: 可选；省略时 gateway 会尝试从模型名推断 provider。
 - `--env-path`: 可选，指定包含 provider key 的 `.env` 文件。
 - `--llm-max-rounds`: 粗切分长度错误后的最大修复轮数，默认 `5`。
-- `--source-concurrency`: 同时在途的源音频文件数上限，默认 `1`。
-- `--asr-max-batch-size`: 单个共享 Qwen3-ASR worker 的 batch size。
-- `--aligner-num-workers`: forced-aligner 模型实例数量，默认 `1`。
-- `--aligner-max-batch-size`: 每个 forced-aligner worker 的 batch size。
-- `--llm-concurrency`: `slide_LLM` 同时在途的 LLM 调用数上限，默认 `8`。
+- `--asr-max-batch-size`: 全局 ASR inference batch 的最大 chunk 数，默认 `1`。当当前音频剩余
+  chunk 少于 batch 容量时，下一条已就绪音频的 chunk 可以补进同一个 ASR batch。
+- `--llm-concurrency`: `slide_LLM` 同时在途的 LLM 调用数上限，默认 `8`。底层
   LLM gateway 的 provider/model/global 限流仍然会继续生效。
 
-当 `--input` 是目录时，`slide_LLM` 会按 `--source-concurrency` 并发调度音频。
-`slide_rule` 和 `slide_LLM` 都使用一个共享 Qwen3-ASR worker；如果 VRAM 充足，
-可以通过 `--aligner-num-workers` 加载多个 forced-aligner 实例来加速对齐。
-输出目录按源文件 stem 命名，因此不同子目录下同名 stem 会在处理前被拒绝，以避免写入碰撞。
+当 `--input` 是目录时，`slide_LLM` 会跨音频并发调度：ASR 使用一个全局 batcher，
+LLM 调用使用独立并发池。每条音频内部仍保持阶段顺序，但 ASR batch 可以由多条音频的
+chunk 共同填满；同时，一条音频可以正在 ASR，其他音频可以等待标点或粗切分 LLM 调用。
+输出目录按源文件 stem 命名，因此不同子目录下同名 stem 会在处理前被拒绝，以避免并发写入碰撞。
 
 ## 最终音量归一化（可选）
 
