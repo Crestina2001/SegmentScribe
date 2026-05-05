@@ -131,6 +131,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Analyze and write reports, but do not write normalized audio or JSONL.",
     )
+    parser.add_argument(
+        "--allow-empty-output",
+        action="store_true",
+        help=(
+            "Exit successfully when every row is pruned. Analysis and pruned-row reports "
+            "are still written, but no normalized JSONL/audio is produced."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files.")
     return parser.parse_args()
 
@@ -519,9 +527,6 @@ def main() -> None:
     }
     kept_stats = [item for item in stats if item.record.index not in pruned_indices]
     pruned_stats = [item for item in stats if item.record.index in pruned_indices]
-    if not kept_stats:
-        raise SystemExit("All JSONL rows were pruned; nothing to normalize.")
-
     ensure_no_existing_outputs(
         output_dir=output_dir,
         output_jsonl_path=output_jsonl_path,
@@ -531,6 +536,25 @@ def main() -> None:
         overwrite=args.overwrite,
     )
     write_analysis_report(report_path, stats, decisions, args.target_lufs, pruned_indices)
+    if not kept_stats:
+        if not args.dry_run:
+            write_jsonl(
+                pruned_jsonl_path,
+                [pruned_payload(item.record, decisions[item.record.index]) for item in pruned_stats],
+            )
+        print("\nSegment loudness summary:")
+        print(f"  JSONL rows analyzed: {len(stats)}")
+        print(f"  Rows pruned: {len(pruned_indices)}")
+        print("  Rows kept: 0")
+        print(f"  Target loudness: {args.target_lufs:.1f} LUFS")
+        print(f"  Analysis report: {report_path}")
+        if not args.dry_run:
+            print(f"  Pruned rows JSONL: {pruned_jsonl_path}")
+        message = "All JSONL rows were pruned; no normalized audio was written."
+        print(f"\n{message}")
+        if args.allow_empty_output:
+            return
+        raise SystemExit(message)
 
     print("\nSegment loudness summary:")
     print(f"  JSONL rows analyzed: {len(stats)}")

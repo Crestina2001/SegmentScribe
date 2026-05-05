@@ -17,8 +17,18 @@ from .actions import (
     run_speaker_filter,
     run_volume_normalize,
 )
-from .commands import LLM_PROVIDERS, RULE_SLICE_MODE, SLICE_MODES
+from .commands import LLM_PROVIDERS, LLM_ROUGH_CUT_STRATEGIES, RULE_ROUGH_CUT_STRATEGIES, SLICE_MODES
 from .dialogs import browse_folder, browse_jsonl_file, browse_jsonl_save
+from .env_config import (
+    env_bool,
+    env_choice,
+    env_float,
+    env_int,
+    env_optional_json,
+    env_optional_text,
+    env_path as env_default_path,
+    env_slice_mode,
+)
 from .paths import DEFAULT_WORK_DIR, PROJECT_ROOT
 
 
@@ -34,37 +44,67 @@ def build_tabs() -> None:
 
 
 def _shared_slice_controls(prefix: str, *, include_device: bool = True, include_run_flags: bool = True):
-    mode = gr.Dropdown(list(SLICE_MODES), value=RULE_SLICE_MODE, label="Slicing mode")
-    model = gr.Textbox(label="ASR model path", value=str(PROJECT_ROOT / "checkpoints" / "Qwen3-ASR-1.7B"))
-    aligner = gr.Textbox(label="Forced aligner path", value=str(PROJECT_ROOT / "checkpoints" / "Qwen3-ForcedAligner-0.6B"))
+    mode = gr.Dropdown(list(SLICE_MODES), value=env_slice_mode(), label="Slicing mode")
+    model = gr.Textbox(label="ASR model path", value=env_default_path("ASR_MODEL_PATH", str(PROJECT_ROOT / "checkpoints" / "Qwen3-ASR-1.7B")))
+    aligner = gr.Textbox(label="Forced aligner path", value=env_default_path("ALIGNER_PATH", str(PROJECT_ROOT / "checkpoints" / "Qwen3-ForcedAligner-0.6B")))
     with gr.Row():
         browse_model = gr.Button("Browse ASR model...")
         browse_aligner = gr.Button("Browse aligner...")
     with gr.Row():
-        backend = gr.Dropdown(["transformers", "vllm"], value="transformers", label="ASR backend")
-        device = gr.Textbox(label="Device", value="cuda:0") if include_device else None
-        dtype = gr.Dropdown(["bfloat16", "float16", "float32"], value="bfloat16", label="dtype")
-        batch = gr.Number(label="ASR batch size", value=1, precision=0)
+        backend = gr.Dropdown(["transformers", "vllm"], value=env_choice("ASR_BACKEND", ["transformers", "vllm"], "transformers"), label="ASR backend")
+        device = gr.Textbox(label="Device", value=env_optional_text("DEVICE", "cuda:0")) if include_device else None
+        dtype = gr.Dropdown(["bfloat16", "float16", "float32"], value=env_choice("DTYPE", ["bfloat16", "float16", "float32"], "bfloat16"), label="dtype")
+        batch = gr.Number(label="ASR batch size", value=env_int("ASR_MAX_BATCH_SIZE", 8), precision=0)
     with gr.Row():
-        min_sec = gr.Number(label="Min segment seconds", value=3.0)
-        max_sec = gr.Number(label="Max segment seconds", value=10.0)
-        vad = gr.Dropdown(["auto", "silero", "librosa"], value="auto", label="VAD backend")
+        min_sec = gr.Number(label="Min segment seconds", value=env_float("MIN_SEG_SEC", 3.0))
+        max_sec = gr.Number(label="Max segment seconds", value=env_float("MAX_SEG_SEC", 10.0))
+        vad = gr.Dropdown(["auto", "silero", "librosa"], value=env_choice("VAD_BACKEND", ["auto", "silero", "librosa"], "auto"), label="VAD backend")
     with gr.Row():
-        language = gr.Textbox(label="Language hint", value="")
-        punctuation = gr.Checkbox(label="Punctuation correction", value=False)
-        overwrite = gr.Checkbox(label="Overwrite", value=True) if include_run_flags else None
-        dry = gr.Checkbox(label="Dry run", value=False) if include_run_flags else None
+        language = gr.Textbox(label="Language hint", value=env_optional_text("LANGUAGE"))
+        punctuation = gr.Checkbox(label="Punctuation correction", value=env_bool("ENABLE_PUNCTUATION_CORRECTION", False))
+        overwrite = gr.Checkbox(label="Overwrite", value=env_bool("OVERWRITE", True)) if include_run_flags else None
+        dry = gr.Checkbox(label="Dry run", value=env_bool("DRY_RUN", False)) if include_run_flags else None
+    with gr.Accordion("Advanced ASR and alignment settings", open=False):
+        asr_backend_kwargs = gr.Textbox(label="ASR backend kwargs JSON", value=env_optional_json("ASR_BACKEND_KWARGS"), lines=2)
+        forced_aligner_kwargs = gr.Textbox(label="Forced aligner kwargs JSON", value=env_optional_json("FORCED_ALIGNER_KWARGS"), lines=2)
+        with gr.Row():
+            aligner_batch = gr.Number(label="Aligner batch size", value=env_int("ALIGNER_MAX_BATCH_SIZE", 1), precision=0)
+            aligner_concurrency = gr.Number(label="Aligner concurrency", value=env_int("ALIGNER_CONCURRENCY", 1), precision=0)
+            target_sample_rate = gr.Number(label="Target sample rate", value=env_int("TARGET_SAMPLE_RATE", 16000), precision=0)
+            max_source_seconds = gr.Number(label="Max source seconds", value=env_float("MAX_SOURCE_SECONDS", 1800.0))
+        allowed_extensions = gr.Textbox(label="Allowed extensions (comma-separated, blank uses CLI default)", value=env_optional_text("ALLOWED_EXTENSIONS"))
+    with gr.Accordion("Advanced prepass and VAD settings", open=False):
+        with gr.Row():
+            preprocess_chunk_mode = gr.Dropdown(["rms_silence", "vad"], value=env_choice("PREPROCESS_CHUNK_MODE", ["rms_silence", "vad"], "rms_silence"), label="Preprocess chunk mode")
+            preprocess_chunk_sec = gr.Number(label="Preprocess chunk seconds", value=env_float("PREPROCESS_CHUNK_SEC", 30.0))
+            preprocess_min_chunk_sec = gr.Number(label="Min chunk seconds", value=env_float("PREPROCESS_MIN_CHUNK_SEC", 5.0))
+            preprocess_max_chunk_sec = gr.Number(label="Max chunk seconds", value=env_float("PREPROCESS_MAX_CHUNK_SEC", 15.0))
+        with gr.Row():
+            rms_frame = gr.Number(label="RMS frame ms", value=env_float("RMS_SILENCE_FRAME_MS", 25.0))
+            rms_hop = gr.Number(label="RMS hop ms", value=env_float("RMS_SILENCE_HOP_MS", 5.0))
+            rms_percentile = gr.Number(label="RMS percentile", value=env_float("RMS_SILENCE_PERCENTILE", 25.0))
+            rms_threshold = gr.Number(label="RMS threshold multiplier", value=env_float("RMS_SILENCE_THRESHOLD_MULTIPLIER", 1.8))
+        with gr.Row():
+            rms_min_silence = gr.Number(label="RMS min silence ms", value=env_float("RMS_MIN_SILENCE_MS", 80.0))
+            vad_threshold = gr.Number(label="VAD threshold", value=env_float("VAD_THRESHOLD", 0.5))
+            vad_min_speech = gr.Number(label="VAD min speech ms", value=env_int("VAD_MIN_SPEECH_MS", 250), precision=0)
+            vad_min_silence = gr.Number(label="VAD min silence ms", value=env_int("VAD_MIN_SILENCE_MS", 300), precision=0)
+            vad_speech_pad = gr.Number(label="VAD speech pad ms", value=env_int("VAD_SPEECH_PAD_MS", 200), precision=0)
+    with gr.Accordion("Rough-cut strategy settings", open=False):
+        with gr.Row():
+            rough_cut_strategy = gr.Dropdown(list(RULE_ROUGH_CUT_STRATEGIES), value=env_choice("ROUGH_CUT_STRATEGY", RULE_ROUGH_CUT_STRATEGIES, "priority_silence_v3"), label="Rule rough-cut strategy")
+            llm_rough_cut_strategy = gr.Dropdown(list(LLM_ROUGH_CUT_STRATEGIES), value=env_choice("LLM_ROUGH_CUT_STRATEGY", LLM_ROUGH_CUT_STRATEGIES, "llm_slice_v1"), label="LLM rough-cut strategy")
     with gr.Accordion("LLM slicing settings", open=False):
-        llm_model = gr.Textbox(label="LLM model", value="")
+        llm_model = gr.Textbox(label="LLM model", value=env_optional_text("LLM_MODEL"))
         with gr.Row():
-            punct_llm_model = gr.Textbox(label="Punctuation LLM override", value="")
-            rough_llm_model = gr.Textbox(label="Rough-cut LLM override", value="")
+            punct_llm_model = gr.Textbox(label="Punctuation LLM override", value=env_optional_text("PUNCT_LLM_MODEL"))
+            rough_llm_model = gr.Textbox(label="Rough-cut LLM override", value=env_optional_text("ROUGH_LLM_MODEL"))
         with gr.Row():
-            llm_provider = gr.Dropdown(list(LLM_PROVIDERS), value="", label="LLM provider")
-            env_path = gr.Textbox(label="Env path", value=".env")
+            llm_provider = gr.Dropdown(list(LLM_PROVIDERS), value=env_choice("LLM_PROVIDER", LLM_PROVIDERS, ""), label="LLM provider")
+            env_path = gr.Textbox(label="Env path", value=env_optional_text("ENV_PATH", ".env"))
         with gr.Row():
-            llm_concurrency = gr.Number(label="LLM concurrency", value=8, precision=0)
-            llm_max_rounds = gr.Number(label="LLM max rounds", value=5, precision=0)
+            llm_concurrency = gr.Number(label="LLM concurrency", value=env_int("LLM_CONCURRENCY", 8), precision=0)
+            llm_max_rounds = gr.Number(label="LLM max rounds", value=env_int("LLM_MAX_ROUNDS", 5), precision=0)
     browse_model.click(browse_folder, inputs=model, outputs=model)
     browse_aligner.click(browse_folder, inputs=aligner, outputs=aligner)
     controls = {
@@ -79,6 +119,28 @@ def _shared_slice_controls(prefix: str, *, include_device: bool = True, include_
         f"{prefix}_vad": vad,
         f"{prefix}_language": language,
         f"{prefix}_punctuation": punctuation,
+        f"{prefix}_asr_backend_kwargs": asr_backend_kwargs,
+        f"{prefix}_forced_aligner_kwargs": forced_aligner_kwargs,
+        f"{prefix}_aligner_batch": aligner_batch,
+        f"{prefix}_aligner_concurrency": aligner_concurrency,
+        f"{prefix}_target_sample_rate": target_sample_rate,
+        f"{prefix}_max_source_seconds": max_source_seconds,
+        f"{prefix}_allowed_extensions": allowed_extensions,
+        f"{prefix}_preprocess_chunk_mode": preprocess_chunk_mode,
+        f"{prefix}_preprocess_chunk_sec": preprocess_chunk_sec,
+        f"{prefix}_preprocess_min_chunk_sec": preprocess_min_chunk_sec,
+        f"{prefix}_preprocess_max_chunk_sec": preprocess_max_chunk_sec,
+        f"{prefix}_rms_frame": rms_frame,
+        f"{prefix}_rms_hop": rms_hop,
+        f"{prefix}_rms_percentile": rms_percentile,
+        f"{prefix}_rms_threshold": rms_threshold,
+        f"{prefix}_rms_min_silence": rms_min_silence,
+        f"{prefix}_vad_threshold": vad_threshold,
+        f"{prefix}_vad_min_speech": vad_min_speech,
+        f"{prefix}_vad_min_silence": vad_min_silence,
+        f"{prefix}_vad_speech_pad": vad_speech_pad,
+        f"{prefix}_rough_cut_strategy": rough_cut_strategy,
+        f"{prefix}_llm_rough_cut_strategy": llm_rough_cut_strategy,
         f"{prefix}_llm_model": llm_model,
         f"{prefix}_punct_llm_model": punct_llm_model,
         f"{prefix}_rough_llm_model": rough_llm_model,
@@ -98,78 +160,78 @@ def _shared_slice_controls(prefix: str, *, include_device: bool = True, include_
 
 def _build_full_pipeline_tab() -> None:
     with gr.Tab("Full pipeline"):
-        source_path = gr.Textbox(label="Source audio folder or file", value=str(PROJECT_ROOT / "audios"))
-        workspace = gr.Textbox(label="Workspace", value=str(DEFAULT_WORK_DIR))
+        source_path = gr.Textbox(label="Source audio folder or file", value=env_default_path("SOURCE_PATH", str(PROJECT_ROOT / "audios")))
+        workspace = gr.Textbox(label="Workspace", value=env_default_path("WORKSPACE", str(DEFAULT_WORK_DIR)))
         with gr.Row():
             browse_full_source = gr.Button("Browse source...")
             browse_full_workspace = gr.Button("Browse workspace...")
         with gr.Row():
-            overwrite = gr.Checkbox(label="Overwrite outputs", value=True)
-            recursive = gr.Checkbox(label="Scan folders recursively", value=True)
+            overwrite = gr.Checkbox(label="Overwrite outputs", value=env_bool("OVERWRITE", True))
+            recursive = gr.Checkbox(label="Scan folders recursively", value=env_bool("RECURSIVE", True))
         with gr.Row():
-            do_convert = gr.Checkbox(label="1. Transform format", value=True)
-            do_music = gr.Checkbox(label="2. Eliminate music", value=False)
-            do_denoise = gr.Checkbox(label="3. Eliminate noise", value=True)
-            do_presplit = gr.Checkbox(label="4. Pre-split long audio", value=False)
-            do_slice = gr.Checkbox(label="5. Slice audios", value=True)
-            do_speaker_filter = gr.Checkbox(label="7. Filter speaker outliers", value=False)
-            do_volume_normalize = gr.Checkbox(label="8. Normalize volume", value=False)
+            do_convert = gr.Checkbox(label="1. Transform format", value=env_bool("DO_CONVERT", True))
+            do_music = gr.Checkbox(label="2. Eliminate music", value=env_bool("DO_MUSIC", False))
+            do_denoise = gr.Checkbox(label="3. Eliminate noise", value=env_bool("DO_DENOISE", True))
+            do_presplit = gr.Checkbox(label="4. Pre-split long audio", value=env_bool("DO_PRESPLIT", False))
+            do_slice = gr.Checkbox(label="5. Slice audios", value=env_bool("DO_SLICE", True))
+            do_speaker_filter = gr.Checkbox(label="6. Filter speaker outliers", value=env_bool("DO_SPEAKER_FILTER", False))
+            do_volume_normalize = gr.Checkbox(label="7. Normalize volume", value=env_bool("DO_VOLUME_NORMALIZE", False))
 
         with gr.Accordion("Conversion settings", open=False):
-            sample_rate = gr.Number(label="Sample rate", value=16000, precision=0)
+            sample_rate = gr.Number(label="Sample rate", value=env_int("SAMPLE_RATE", 16000), precision=0)
 
         with gr.Accordion("Music removal settings", open=False):
-            demucs_model = gr.Dropdown(["htdemucs", "htdemucs_ft"], value="htdemucs", label="Demucs model")
+            demucs_model = gr.Dropdown(["htdemucs", "htdemucs_ft"], value=env_choice("DEMUCS_MODEL", ["htdemucs", "htdemucs_ft"], "htdemucs"), label="Demucs model")
             with gr.Row():
-                device = gr.Textbox(label="Device", value="cuda:0")
-                demucs_shifts = gr.Number(label="Demucs shifts", value=1, precision=0)
-                demucs_jobs = gr.Number(label="Demucs jobs", value=0, precision=0)
-                demucs_segment = gr.Number(label="Demucs segment seconds", value=0, precision=1)
+                device = gr.Textbox(label="Device", value=env_optional_text("DEVICE", "cuda:0"))
+                demucs_shifts = gr.Number(label="Demucs shifts", value=env_int("DEMUCS_SHIFTS", 1), precision=0)
+                demucs_jobs = gr.Number(label="Demucs jobs", value=env_int("DEMUCS_JOBS", 0), precision=0)
+                demucs_segment = gr.Number(label="Demucs segment seconds", value=env_float("DEMUCS_SEGMENT", 0.0), precision=1)
 
         with gr.Accordion("Denoise settings", open=False):
-            denoise_method = gr.Dropdown(["MossFormer2", "ZipEnhancer"], value="MossFormer2", label="Method")
+            denoise_method = gr.Dropdown(["MossFormer2", "ZipEnhancer"], value=env_choice("DENOISE_METHOD", ["MossFormer2", "ZipEnhancer"], "MossFormer2"), label="Method")
             mossformer_model_path = gr.Textbox(
                 label="MossFormer checkpoint path",
-                value=str(PROJECT_ROOT / "checkpoints" / "MossFormer2_SE_48K"),
+                value=env_default_path("MOSSFORMER_MODEL_PATH", str(PROJECT_ROOT / "checkpoints" / "MossFormer2_SE_48K")),
             )
             browse_full_mossformer = gr.Button("Browse MossFormer checkpoint...")
-            mossformer_cpu = gr.Checkbox(label="Force MossFormer CPU", value=False)
+            mossformer_cpu = gr.Checkbox(label="Force MossFormer CPU", value=env_bool("MOSSFORMER_CPU", False))
             with gr.Row():
-                preprocess_workers = gr.Number(label="Preprocess workers", value=1, precision=0)
-                inference_batch_size = gr.Number(label="Inference batch size", value=1, precision=0)
-            zip_model = gr.Textbox(label="ZipEnhancer model", value=str(PROJECT_ROOT / "checkpoints" / "ZipEnhancer"))
+                preprocess_workers = gr.Number(label="Preprocess workers", value=env_int("PREPROCESS_WORKERS", 4), precision=0)
+                inference_batch_size = gr.Number(label="Inference batch size", value=env_int("INFERENCE_BATCH_SIZE", 4), precision=0)
+            zip_model = gr.Textbox(label="ZipEnhancer model", value=env_default_path("ZIP_MODEL", str(PROJECT_ROOT / "checkpoints" / "ZipEnhancer")))
             with gr.Row():
-                zip_normalize = gr.Dropdown(["match_original", "none", "library_median"], value="match_original", label="Zip normalize")
-                zip_alignment_metric = gr.Dropdown(["rms", "peak"], value="rms", label="Zip alignment metric")
+                zip_normalize = gr.Dropdown(["match_original", "none", "library_median"], value=env_choice("ZIP_NORMALIZE", ["match_original", "none", "library_median"], "match_original"), label="Zip normalize")
+                zip_alignment_metric = gr.Dropdown(["rms", "peak"], value=env_choice("ZIP_ALIGNMENT_METRIC", ["rms", "peak"], "rms"), label="Zip alignment metric")
 
         with gr.Accordion("Pre-split long audio settings", open=False):
             with gr.Row():
-                presplit_target = gr.Number(label="Target piece seconds", value=300.0)
-                presplit_window = gr.Number(label="Search window seconds", value=60.0)
-                presplit_frame = gr.Number(label="Frame ms", value=20.0)
+                presplit_target = gr.Number(label="Target piece seconds", value=env_float("PRESPLIT_TARGET_PIECE_SECONDS", 300.0))
+                presplit_window = gr.Number(label="Search window seconds", value=env_float("PRESPLIT_SEARCH_WINDOW_SECONDS", 60.0))
+                presplit_frame = gr.Number(label="Frame ms", value=env_float("PRESPLIT_FRAME_MS", 20.0))
             with gr.Row():
-                presplit_hop = gr.Number(label="Hop ms", value=5.0)
-                presplit_silence = gr.Number(label="Min silence ms", value=30.0)
+                presplit_hop = gr.Number(label="Hop ms", value=env_float("PRESPLIT_HOP_MS", 5.0))
+                presplit_silence = gr.Number(label="Min silence ms", value=env_float("PRESPLIT_MIN_SILENCE_MS", 30.0))
 
         with gr.Accordion("Slicing settings", open=False):
             slice_controls = _shared_slice_controls("full", include_device=False, include_run_flags=False)
 
         with gr.Accordion("Speaker filter settings", open=False):
             with gr.Row():
-                speaker_device = gr.Textbox(label="Speaker filter device", value="cuda:0")
-                speaker_mad = gr.Number(label="MAD multiplier", value=3.0)
-                speaker_max_prune = gr.Number(label="Max prune ratio", value=0.10)
-                speaker_min_rows = gr.Number(label="Min rows", value=8, precision=0)
+                speaker_device = gr.Textbox(label="Speaker filter device", value=env_optional_text("SPEAKER_DEVICE", "cuda:0"))
+                speaker_mad = gr.Number(label="MAD multiplier", value=env_float("SPEAKER_MAD_MULTIPLIER", 3.0))
+                speaker_max_prune = gr.Number(label="Max prune ratio", value=env_float("SPEAKER_MAX_PRUNE_RATIO", 0.10))
+                speaker_min_rows = gr.Number(label="Min rows", value=env_int("SPEAKER_MIN_ROWS", 8), precision=0)
 
         with gr.Accordion("Volume normalization settings", open=False):
             with gr.Row():
-                volume_target = gr.Number(label="Target LUFS", value=-20.0)
-                volume_max_gain = gr.Number(label="Max upward gain dB", value=12.0)
-                volume_dynamic = gr.Number(label="Max dynamic range dB", value=24.0)
+                volume_target = gr.Number(label="Target LUFS", value=env_float("VOLUME_TARGET_LUFS", -20.0))
+                volume_max_gain = gr.Number(label="Max upward gain dB", value=env_float("VOLUME_MAX_VOLUME_CHANGE_DB", 12.0))
+                volume_dynamic = gr.Number(label="Max dynamic range dB", value=env_float("VOLUME_MAX_DYNAMIC_RANGE_DB", 24.0))
             with gr.Row():
-                volume_peak_margin = gr.Number(label="Peak margin dB", value=1.0)
-                volume_active_ratio = gr.Number(label="Min active ratio", value=0.03)
-                volume_sample_rate = gr.Number(label="Output sample rate (0 keeps source)", value=0, precision=0)
+                volume_peak_margin = gr.Number(label="Peak margin dB", value=env_float("VOLUME_PEAK_MARGIN_DB", 1.0))
+                volume_active_ratio = gr.Number(label="Min active ratio", value=env_float("VOLUME_MIN_ACTIVE_RATIO", 0.03))
+                volume_sample_rate = gr.Number(label="Output sample rate (0 keeps source)", value=env_int("VOLUME_SAMPLE_RATE", 0), precision=0)
 
         browse_full_source.click(browse_folder, inputs=source_path, outputs=source_path)
         browse_full_workspace.click(browse_folder, inputs=workspace, outputs=workspace)
@@ -226,6 +288,28 @@ def _build_full_pipeline_tab() -> None:
                 slice_controls["full_env_path"],
                 slice_controls["full_llm_concurrency"],
                 slice_controls["full_llm_max_rounds"],
+                slice_controls["full_asr_backend_kwargs"],
+                slice_controls["full_forced_aligner_kwargs"],
+                slice_controls["full_aligner_batch"],
+                slice_controls["full_aligner_concurrency"],
+                slice_controls["full_target_sample_rate"],
+                slice_controls["full_max_source_seconds"],
+                slice_controls["full_allowed_extensions"],
+                slice_controls["full_preprocess_chunk_mode"],
+                slice_controls["full_preprocess_chunk_sec"],
+                slice_controls["full_preprocess_min_chunk_sec"],
+                slice_controls["full_preprocess_max_chunk_sec"],
+                slice_controls["full_rms_frame"],
+                slice_controls["full_rms_hop"],
+                slice_controls["full_rms_percentile"],
+                slice_controls["full_rms_threshold"],
+                slice_controls["full_rms_min_silence"],
+                slice_controls["full_vad_threshold"],
+                slice_controls["full_vad_min_speech"],
+                slice_controls["full_vad_min_silence"],
+                slice_controls["full_vad_speech_pad"],
+                slice_controls["full_rough_cut_strategy"],
+                slice_controls["full_llm_rough_cut_strategy"],
                 do_speaker_filter,
                 speaker_device,
                 speaker_mad,
@@ -361,6 +445,28 @@ def _build_single_stages_tab() -> None:
                     slice_controls["single_env_path"],
                     slice_controls["single_llm_concurrency"],
                     slice_controls["single_llm_max_rounds"],
+                    slice_controls["single_asr_backend_kwargs"],
+                    slice_controls["single_forced_aligner_kwargs"],
+                    slice_controls["single_aligner_batch"],
+                    slice_controls["single_aligner_concurrency"],
+                    slice_controls["single_target_sample_rate"],
+                    slice_controls["single_max_source_seconds"],
+                    slice_controls["single_allowed_extensions"],
+                    slice_controls["single_preprocess_chunk_mode"],
+                    slice_controls["single_preprocess_chunk_sec"],
+                    slice_controls["single_preprocess_min_chunk_sec"],
+                    slice_controls["single_preprocess_max_chunk_sec"],
+                    slice_controls["single_rms_frame"],
+                    slice_controls["single_rms_hop"],
+                    slice_controls["single_rms_percentile"],
+                    slice_controls["single_rms_threshold"],
+                    slice_controls["single_rms_min_silence"],
+                    slice_controls["single_vad_threshold"],
+                    slice_controls["single_vad_min_speech"],
+                    slice_controls["single_vad_min_silence"],
+                    slice_controls["single_vad_speech_pad"],
+                    slice_controls["single_rough_cut_strategy"],
+                    slice_controls["single_llm_rough_cut_strategy"],
                 ],
                 outputs=s_log,
             )
@@ -379,7 +485,7 @@ def _build_single_stages_tab() -> None:
 
 
 def _build_results_tab() -> None:
-    with gr.Tab("6. Check result"):
+    with gr.Tab("Review results"):
         result_dir = gr.Textbox(label="Sliced output folder", value=str(DEFAULT_WORK_DIR / "04_sliced"))
         result_browse_folder = gr.Button("Browse result folder...")
         refresh = gr.Button("Refresh results", variant="primary")
@@ -395,7 +501,7 @@ def _build_results_tab() -> None:
 
 
 def _build_speaker_filter_tab() -> None:
-    with gr.Tab("7. Filter speaker outliers"):
+    with gr.Tab("6. Filter speaker outliers"):
         speaker_input = gr.Textbox(label="Input VoxCPM JSONL")
         speaker_output = gr.Textbox(label="Filtered output JSONL")
         speaker_root = gr.Textbox(label="Dataset root (optional)")
@@ -424,7 +530,7 @@ def _build_speaker_filter_tab() -> None:
 
 
 def _build_volume_tab() -> None:
-    with gr.Tab("8. Normalize volume"):
+    with gr.Tab("7. Normalize volume"):
         volume_input = gr.Textbox(label="Sliced input folder", value=str(DEFAULT_WORK_DIR / "04_sliced"))
         volume_output = gr.Textbox(label="Normalized output folder", value=str(DEFAULT_WORK_DIR / "05_normalized"))
         volume_jsonl = gr.Textbox(label="JSONL filename/path (optional)", value="")

@@ -32,4 +32,4 @@ yamlargparse==1.31.1
 
 # Optional: required for slide_rule --asr-backend vllm.
 # vLLM is Linux/WSL-oriented and is not available for native Windows pip installs.
-vllm ; platform_system == "Linux"
+vllm==0.14.0 ; platform_system == "Linux"
