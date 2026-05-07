@@ -78,12 +78,14 @@ PREPROCESS_MAX_CHUNK_SEC=15
 ASR_MAX_BATCH_SIZE=8
 ALIGNER_MAX_BATCH_SIZE=1
 ALIGNER_CONCURRENCY=1
+THIN_CUT_PADDING_SEC=0.2
 ```
 
 This lets Qwen3-ASR and Qwen3-ForcedAligner see the same short audio window,
 then stitches timestamps back into a source-level stream before punctuation
-and rough cutting. Set `PREPROCESS_CHUNK_MODE="vad"` to use the older VAD-packed
-`PREPROCESS_CHUNK_SEC` behavior.
+and rough cutting. `THIN_CUT_PADDING_SEC` controls how much audio is kept around
+the final silence-aware trim. Set `PREPROCESS_CHUNK_MODE="vad"` to use the older
+VAD-packed `PREPROCESS_CHUNK_SEC` behavior.
 
 Download the WebUI's default model checkpoints:
 

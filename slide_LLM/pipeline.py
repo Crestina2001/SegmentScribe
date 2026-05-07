@@ -452,6 +452,7 @@ class SlideLLMPipeline:
                     provider=cfg.llm_provider,
                     max_rounds=cfg.llm_max_rounds,
                     strategy=cfg.rough_cut_strategy,
+                    trim_padding_sec=cfg.thin_cut_padding_sec,
                 )
                 rough_mode = "llm"
             else:
@@ -472,7 +473,22 @@ class SlideLLMPipeline:
             logger.error("Source %d/%d rough_cut_error: %s", index, total, exc)
             return self._finish_source(result, index=index, total=total, started_at=source_started)
 
-        planner_error = next((trace.error for trace in phase3.block_traces if trace.error), None)
+        planner_errors = [
+            {
+                "block_index": trace.block_index,
+                "char_start_idx": trace.char_start_idx,
+                "char_end_idx": trace.char_end_idx,
+                "block_start_sec": trace.block_start_sec,
+                "block_end_sec": trace.block_end_sec,
+                "error": trace.error,
+                "fallback_strategy": trace.prompt_summary.get("fallback_strategy"),
+                "fallback_scope": trace.prompt_summary.get("fallback_scope"),
+                "llm_exception_traceback": trace.prompt_summary.get("llm_exception_traceback"),
+            }
+            for trace in phase3.block_traces
+            if trace.error
+        ]
+        planner_error = planner_errors[0]["error"] if planner_errors else None
         _write_json(
             src_dirs.traces_dir / "rough_cut.json",
             {
@@ -483,6 +499,15 @@ class SlideLLMPipeline:
                 "blocks": [dataclasses.asdict(trace) for trace in phase3.block_traces],
             },
         )
+        if planner_errors:
+            _write_json(
+                src_dirs.traces_dir / "rough_cut_errors.json",
+                {
+                    "mode": rough_mode,
+                    "strategy": cfg.rough_cut_strategy,
+                    "errors": planner_errors,
+                },
+            )
         _write_json(src_dirs.intermediate_dir / "phase3_rough_cut.json", dataclasses.asdict(phase3))
         logger.info(
             "Source %d/%d rough cut completed in %.2fs: segments=%d blocks=%d planner_error=%s",
@@ -495,7 +520,12 @@ class SlideLLMPipeline:
         )
 
         phase_started = time.perf_counter()
-        phase4 = run_thin_cut_phase(audio=audio, sample_rate=sr, segments=phase3.segments)
+        phase4 = run_thin_cut_phase(
+            audio=audio,
+            sample_rate=sr,
+            segments=phase3.segments,
+            padding_sec=cfg.thin_cut_padding_sec,
+        )
         _write_json(
             src_dirs.traces_dir / "thin_cut.json",
             {
@@ -693,6 +723,7 @@ class SlideLLMPipeline:
                 "max_source_seconds": cfg.max_source_seconds,
                 "overwrite": cfg.overwrite,
                 "dry_run": cfg.dry_run,
+                "thin_cut_padding_sec": cfg.thin_cut_padding_sec,
             },
             "generated_at_unix": int(time.time()),
         }

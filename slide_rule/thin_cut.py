@@ -9,9 +9,9 @@ import numpy as np
 
 from slicing_utils.rough_cut import RoughSegment
 
+from .config import DEFAULT_THIN_CUT_PADDING_SEC
 
 TRIM_TOP_DB = 60
-TRIM_PADDING_SEC = 0.1
 
 
 @dataclass
@@ -66,7 +66,7 @@ def run_thin_cut_phase(
     sample_rate: int,
     segments: Sequence[RoughSegment],
     top_db: int = TRIM_TOP_DB,
-    padding_sec: float = TRIM_PADDING_SEC,
+    padding_sec: float = DEFAULT_THIN_CUT_PADDING_SEC,
 ) -> Phase4Result:
     result = Phase4Result()
     for seg_idx, rough in enumerate(segments, start=1):

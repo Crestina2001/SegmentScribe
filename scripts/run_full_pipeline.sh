@@ -210,6 +210,7 @@ if is_true "${DO_SLICE:-true}"; then
     --rms-min-silence-ms "${RMS_MIN_SILENCE_MS:-80}"
     --min-seg-sec "${MIN_SEG_SEC:-3}"
     --max-seg-sec "${MAX_SEG_SEC:-10}"
+    --thin-cut-padding-sec "${THIN_CUT_PADDING_SEC:-0.2}"
     --vad-backend "${VAD_BACKEND:-auto}"
   )
   if [[ -n "${LANGUAGE:-}" ]]; then

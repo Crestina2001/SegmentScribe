@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from llm_gateway.models import ProviderName
-from slide_rule.config import AUDIO_EXTENSIONS
+from slide_rule.config import AUDIO_EXTENSIONS, DEFAULT_THIN_CUT_PADDING_SEC
 
 
 @dataclass
@@ -55,6 +55,7 @@ class LLMWorkflowConfig:
     vad_min_speech_ms: int = 250
     vad_min_silence_ms: int = 300
     vad_speech_pad_ms: int = 200
+    thin_cut_padding_sec: float = DEFAULT_THIN_CUT_PADDING_SEC
 
     @property
     def punctuation_model(self) -> str:

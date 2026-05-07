@@ -8,7 +8,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import AUDIO_EXTENSIONS, RuleWorkflowConfig
+from .config import AUDIO_EXTENSIONS, DEFAULT_THIN_CUT_PADDING_SEC, RuleWorkflowConfig
 
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vad-min-silence-ms", type=int, default=300)
     parser.add_argument("--vad-speech-pad-ms", type=int, default=200)
     parser.add_argument(
+        "--thin-cut-padding-sec",
+        type=float,
+        default=DEFAULT_THIN_CUT_PADDING_SEC,
+        help="Seconds of audio to keep before/after librosa thin-cut trim. Default: 0.2.",
+    )
+    parser.add_argument(
         "--rough-cut-strategy",
         default="priority_silence_v3",
         choices=("legacy_dp", "priority_silence_v1", "priority_silence_v2", "priority_silence_v3", "dp_strategy_2"),
@@ -98,6 +104,8 @@ def args_to_config(args: argparse.Namespace):
         raise SystemExit("--aligner-max-batch-size must be > 0.")
     if args.aligner_concurrency <= 0:
         raise SystemExit("--aligner-concurrency must be > 0.")
+    if args.thin_cut_padding_sec < 0:
+        raise SystemExit("--thin-cut-padding-sec must be >= 0.")
     if (
         args.preprocess_min_chunk_sec <= 0
         or args.preprocess_max_chunk_sec <= 0
@@ -144,6 +152,7 @@ def args_to_config(args: argparse.Namespace):
         vad_speech_pad_ms=args.vad_speech_pad_ms,
         enable_punctuation_correction=args.enable_punctuation_correction,
         rough_cut_strategy=args.rough_cut_strategy,
+        thin_cut_padding_sec=args.thin_cut_padding_sec,
     )
 
 

@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
+DEFAULT_THIN_CUT_PADDING_SEC = 0.2
 
 
 @dataclass
@@ -48,3 +49,4 @@ class RuleWorkflowConfig:
     vad_speech_pad_ms: int = 200
     enable_punctuation_correction: bool = False
     rough_cut_strategy: str = "priority_silence_v3"
+    thin_cut_padding_sec: float = DEFAULT_THIN_CUT_PADDING_SEC

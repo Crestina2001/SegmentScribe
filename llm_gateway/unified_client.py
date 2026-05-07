@@ -6,7 +6,7 @@ import base64
 import mimetypes
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .concurrency import ConcurrencyController
 from .config import GatewayConfig, load_gateway_config
@@ -145,6 +145,7 @@ class UnifiedClient:
         tool_choice: str | dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         max_tool_rounds: int = 5,
+        terminal_tools: Iterable[str] | None = None,
         metadata: dict[str, Any] | None = None,
         trace_name: str | None = None,
         session_id: str | None = None,
@@ -157,6 +158,7 @@ class UnifiedClient:
 
         tools = tools or []
         tool_registry = self._build_tool_registry(tools)
+        terminal_tool_names = {name.strip() for name in terminal_tools or () if name.strip()}
         provider_name = self.config.resolve_provider(model=model, provider=provider)
         request = self._build_request(
             memory_manager=memory_manager,
@@ -222,6 +224,11 @@ class UnifiedClient:
                 tool_message = await self._tool_result_message(call, tool_registry)
                 messages.append(tool_message)
                 turn_messages.append(dict(tool_message))
+                if call.name in terminal_tool_names:
+                    if conversation_messages is None and memory_manager.stateful:
+                        for message in turn_messages:
+                            memory_manager.append_message(message)
+                    return parsed
 
         raise RuntimeError(f"Maximum tool-call rounds exceeded: {max_tool_rounds}")
 

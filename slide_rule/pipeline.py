@@ -472,7 +472,12 @@ class SlideRulePipeline:
         )
 
         phase_started = time.perf_counter()
-        phase4 = run_thin_cut_phase(audio=audio, sample_rate=sr, segments=phase3.segments)
+        phase4 = run_thin_cut_phase(
+            audio=audio,
+            sample_rate=sr,
+            segments=phase3.segments,
+            padding_sec=cfg.thin_cut_padding_sec,
+        )
         _write_json(
             src_dirs.traces_dir / "thin_cut.json",
             {
@@ -663,6 +668,7 @@ class SlideRulePipeline:
                 "overwrite": cfg.overwrite,
                 "dry_run": cfg.dry_run,
                 "rough_cut_strategy": cfg.rough_cut_strategy,
+                "thin_cut_padding_sec": cfg.thin_cut_padding_sec,
             },
             "generated_at_unix": int(time.time()),
         }

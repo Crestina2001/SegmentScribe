@@ -64,7 +64,40 @@ class OpenAIAdapter(BaseProviderAdapter):
             response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
             raise self._wrap_error(exc) from exc
-        return response.model_dump()
+        return self._response_to_dict(response)
+
+    @staticmethod
+    def _response_to_dict(response: object) -> dict[str, object]:
+        if isinstance(response, dict):
+            return response
+
+        if isinstance(response, str):
+            preview = response[:200].replace("\n", "\\n")
+            raise ProviderRequestError(
+                message=f"OpenAI provider returned raw string response instead of chat completion object: {preview!r}",
+                retryable=True,
+                raw_error=RuntimeError(response),
+            )
+
+        model_dump = getattr(response, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+            raise ProviderRequestError(
+                message=(
+                    "OpenAI provider returned a chat completion object whose model_dump() "
+                    f"produced unsupported type: {type(dumped).__name__}"
+                ),
+                retryable=True,
+                raw_error=RuntimeError(repr(dumped)),
+            )
+
+        raise ProviderRequestError(
+            message=f"OpenAI provider returned unsupported response type: {type(response).__name__}",
+            retryable=True,
+            raw_error=RuntimeError(repr(response)),
+        )
 
     def parse_response(self, raw_response: dict[str, object]) -> PromptResponse:
         choices = raw_response.get("choices") or []

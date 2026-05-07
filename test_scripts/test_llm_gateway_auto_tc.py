@@ -10,6 +10,8 @@ from llm_gateway import MemoryManager, Tool, ToolCallManager, UnifiedClient
 from llm_gateway.config import GatewayConfig, ProviderConfig, RetryConfig
 from llm_gateway.models import PromptRequest, PromptResponse
 from llm_gateway.providers.base import BaseProviderAdapter
+from llm_gateway.providers.openai import OpenAIAdapter
+from llm_gateway.retry import ProviderRequestError
 from slide_LLM.pipeline import PooledLLMClient
 
 
@@ -126,6 +128,14 @@ def test_tool_normalizes_to_openai_tool_definition() -> None:
             },
         }
     ]
+
+
+def test_openai_adapter_marks_raw_string_response_retryable() -> None:
+    with pytest.raises(ProviderRequestError) as exc_info:
+        OpenAIAdapter._response_to_dict("temporary proxy error")
+
+    assert exc_info.value.retryable is True
+    assert "raw string response" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -297,6 +307,37 @@ async def test_send_prompt_autoTC_max_tool_rounds_raises() -> None:
             tools=[tool],
             max_tool_rounds=1,
         )
+
+
+@pytest.mark.asyncio
+async def test_send_prompt_autoTC_terminal_tool_returns_without_followup_request() -> None:
+    adapter = FakeAdapter(
+        [
+            _tool_call_response(call_id="call_done", name="confirm", arguments={}),
+            _tool_call_response(call_id="call_extra", name="confirm", arguments={}),
+        ]
+    )
+    client = FakeClient(adapter)
+    tool = Tool(
+        name="confirm",
+        description="Confirm final decision.",
+        parameters={"type": "object", "properties": {}},
+        func=lambda: {"committed": True},
+    )
+
+    response = await client.send_prompt_autoTC(
+        MemoryManager(),
+        "confirm",
+        provider="openai",
+        model="test-model",
+        tools=[tool],
+        tool_choice="required",
+        terminal_tools={"confirm"},
+    )
+
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].name == "confirm"
+    assert len(adapter.payloads) == 1
 
 
 @pytest.mark.asyncio

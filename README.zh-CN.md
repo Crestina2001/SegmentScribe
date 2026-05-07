@@ -61,11 +61,13 @@ PREPROCESS_MAX_CHUNK_SEC=15
 ASR_MAX_BATCH_SIZE=8
 ALIGNER_MAX_BATCH_SIZE=1
 ALIGNER_CONCURRENCY=1
+THIN_CUT_PADDING_SEC=0.2
 ```
 
 `slide_rule` 和 `slide_LLM` 都会把这些短窗口的时间戳重新拼回源音频时间轴，
-然后再做标点修正和粗切分。若要使用旧的 VAD 打包 `PREPROCESS_CHUNK_SEC`
-逻辑，可以设置 `PREPROCESS_CHUNK_MODE="vad"`。
+然后再做标点修正和粗切分。`THIN_CUT_PADDING_SEC` 控制最终细切静音裁剪前后
+保留的音频时长。若要使用旧的 VAD 打包 `PREPROCESS_CHUNK_SEC` 逻辑，可以设置
+`PREPROCESS_CHUNK_MODE="vad"`。
 
 配置文件是 bash env 文件，用来控制源音频目录、工作目录、启用的阶段、
 模型路径、切分模式、可选的说话人过滤和可选的音量归一化。各阶段输出会写到

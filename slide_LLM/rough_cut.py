@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import traceback
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
@@ -17,10 +18,16 @@ from slicing_utils.rough_cut import (
     Phase3Result,
     RoughBoundary,
     RoughSegment,
+    _candidate_in_regions,
     _extract_punctuation_boundaries,
     _priority_leftover_spans,
     _priority_span_to_cut,
     _priority_span_to_segment,
+    _priority_v3_combined_percentiles,
+    _priority_v3_must_cut,
+    _priority_v3_p40_cut,
+    _priority_v3_p60_cut,
+    _priority_v3_strong_p60_cut,
     _solve_priority_regions,
     _subtract_priority_spans,
     _PriorityRegion,
@@ -28,6 +35,7 @@ from slicing_utils.rough_cut import (
     _segment_start_sec,
 )
 from slicing_utils.shared import STRONG_STOPS, WEAK_STOPS
+from slide_rule.config import DEFAULT_THIN_CUT_PADDING_SEC
 
 from .local_prompts import (
     LLM_SLICE_SYSTEM_PROMPT,
@@ -45,7 +53,6 @@ from .text_rules import is_punct_or_space
 
 
 TRIM_TOP_DB = 60
-TRIM_PADDING_SEC = 0.1
 MAX_EXTENSION_SENTENCES = 2
 PAUSE_CLASSIFICATION_SENTENCE_GROUP_SIZE = 5
 PAUSE_CLASSIFICATION_PADDING = 1
@@ -137,6 +144,7 @@ async def run_llm_rough_cut_phase(
     provider: ProviderName | None = None,
     max_rounds: int = 5,
     strategy: str = "llm_slice_v1",
+    trim_padding_sec: float = DEFAULT_THIN_CUT_PADDING_SEC,
 ) -> Phase3Result:
     if strategy == "llm_pause_priority_silence_v2":
         return await run_llm_pause_priority_silence_v2_phase(
@@ -150,6 +158,7 @@ async def run_llm_rough_cut_phase(
             llm_client=llm_client,
             model=model,
             provider=provider,
+            trim_padding_sec=trim_padding_sec,
         )
     if strategy == "llm_slice_v1":
         return await run_llm_slice_v1_phase(
@@ -164,6 +173,7 @@ async def run_llm_rough_cut_phase(
             model=model,
             provider=provider,
             max_rounds=max_rounds,
+            trim_padding_sec=trim_padding_sec,
         )
     if strategy != "llm_tool":
         raise ValueError(f"unknown LLM rough cut strategy: {strategy}")
@@ -213,6 +223,7 @@ async def run_llm_rough_cut_phase(
             block_index=block_index,
             trim_cache=trim_cache,
             pause_rankings=pause_rankings,
+            trim_padding_sec=trim_padding_sec,
         )
         if not applied:
             break
@@ -238,6 +249,7 @@ async def run_llm_pause_priority_silence_v2_phase(
     llm_client: UnifiedClient,
     model: str,
     provider: ProviderName | None = None,
+    trim_padding_sec: float = DEFAULT_THIN_CUT_PADDING_SEC,
 ) -> Phase3Result:
     result = Phase3Result()
     chars = prepass.global_chars
@@ -268,6 +280,7 @@ async def run_llm_pause_priority_silence_v2_phase(
         labels_by_candidate_id=classification.labels_by_candidate_id,
         min_seg_sec=min_seg_sec,
         max_seg_sec=max_seg_sec,
+        trim_padding_sec=trim_padding_sec,
     )
     result.segments.extend(segments)
     response_cuts = [
@@ -300,6 +313,7 @@ async def run_llm_pause_priority_silence_v2_phase(
                     len(chars) - 1,
                 )[:160],
                 "trim_top_db": TRIM_TOP_DB,
+                "trim_padding_sec": trim_padding_sec,
                 **planner_meta,
             },
             response_cuts=response_cuts,
@@ -347,6 +361,7 @@ async def run_llm_slice_v1_phase(
     model: str,
     provider: ProviderName | None = None,
     max_rounds: int = 5,
+    trim_padding_sec: float = DEFAULT_THIN_CUT_PADDING_SEC,
 ) -> Phase3Result:
     result = Phase3Result()
     chars = prepass.global_chars
@@ -384,6 +399,7 @@ async def run_llm_slice_v1_phase(
             max_rounds=max_rounds,
             trim_cache=trim_cache,
             pause_rankings=pause_rankings,
+            trim_padding_sec=trim_padding_sec,
         )
         result.segments.extend(segments)
         result.block_traces.append(block_trace)
@@ -469,6 +485,7 @@ async def _run_llm_slice_group(
     max_rounds: int,
     trim_cache: dict[tuple[int, int], LengthCheck],
     pause_rankings: dict[int, PausePromptRank],
+    trim_padding_sec: float,
 ) -> tuple[BlockCallTrace, list[RoughSegment]]:
     expected_marker_ids = {marker.marker_id for marker in group.markers}
     target_marker_ids = sorted(expected_marker_ids)
@@ -501,6 +518,7 @@ async def _run_llm_slice_group(
     last_valid_indices: list[int] | None = None
     last_segments_feedback: list[dict[str, Any]] | None = None
     error: str | None = None
+    llm_exception_traceback: str | None = None
 
     def submit_slices(cut_indices: list[int]) -> list[dict[str, Any]]:
         round_log: dict[str, Any] = {"round": len(rounds_log) + 1, "tool": "submit_slices"}
@@ -532,6 +550,7 @@ async def _run_llm_slice_group(
             min_seg_sec=min_seg_sec,
             max_seg_sec=max_seg_sec,
             cache=trim_cache,
+            trim_padding_sec=trim_padding_sec,
         )
         nonlocal last_valid_indices, last_segments_feedback
         last_valid_indices = list(indices)
@@ -553,6 +572,7 @@ async def _run_llm_slice_group(
         return {"committed_cut_indices": list(last_valid_indices)}
 
     final_response_text = ""
+    llm_call_failed = False
     try:
         submit_response = await llm_client.send_prompt_autoTC(
             memory_manager,
@@ -563,6 +583,7 @@ async def _run_llm_slice_group(
             tools=[_submit_slices_tool(func=submit_slices), _confirm_slices_tool(func=confirm_slices)],
             tool_choice="required",
             max_tool_rounds=max_rounds,
+            terminal_tools={"confirm_slices"},
             trace_name="slide_LLM.rough_cut.llm_slice_v1.submit",
             metadata={"phase": "rough_cut_llm_slice_v1", "block_index": group.group_index},
         )
@@ -571,21 +592,67 @@ async def _run_llm_slice_group(
         if "Maximum tool-call rounds exceeded" not in str(exc):
             raise
         error = f"fallback: {exc}; auto-committed latest valid submission if available"
+    except Exception as exc:
+        llm_call_failed = True
+        llm_exception_traceback = traceback.format_exc()
+        error = (
+            "fallback: llm_slice_v1 provider/tool call failed; "
+            f"using priority_silence_v3 for this chunk: {type(exc).__name__}: {exc}"
+        )
 
     committed_from_model = last_valid_indices is not None
     if last_valid_indices is None:
-        last_valid_indices = _llm_slice_fallback_indices(group)
-        _, last_segments_feedback = _llm_slice_length_feedback(
+        segments, applied_cuts, fallback_error, fallback_meta = _priority_silence_v3_llm_slice_fallback(
             audio=audio,
             sample_rate=sample_rate,
             chars=chars,
             group=group,
-            indices=last_valid_indices,
             min_seg_sec=min_seg_sec,
             max_seg_sec=max_seg_sec,
-            cache=trim_cache,
+            trim_padding_sec=trim_padding_sec,
         )
-        error = "fallback: no valid LLM submission; used per-sentence cuts"
+        fallback_reason = (
+            error
+            or "fallback: no structurally valid LLM submit_slices; used priority_silence_v3 for this chunk"
+        )
+        if fallback_error:
+            fallback_reason = f"{fallback_reason}; {fallback_error}"
+        block_trace = BlockCallTrace(
+            block_index=group.group_index,
+            char_start_idx=int(group.target_first_token_idx),
+            char_end_idx=int(group.target_last_token_idx),
+            block_start_sec=float(chars[group.target_first_token_idx].start_sec),
+            block_end_sec=float(chars[group.target_last_token_idx].end_sec),
+            prompt_summary={
+                "planner": "llm_slice_v1",
+                "strategy": "llm_slice_v1",
+                "fallback_strategy": "priority_silence_v3",
+                "fallback_scope": "chunk",
+                "llm_call_failed": llm_call_failed,
+                "target_sentence_indices": target_sentence_indices,
+                "padding_sentence_index": padding_sentence_index,
+                "available_marker_ids": target_marker_ids,
+                "final_marker_id": group.final_marker_id,
+                "target_marker_count": len(target_marker_ids),
+                "expected_range_sec": [min_seg_sec, max_seg_sec],
+                "max_rounds": max_rounds,
+                "sentence_group_size": LLM_SLICE_SENTENCE_GROUP_SIZE,
+                "padding_sentence_count": LLM_SLICE_PADDING,
+                "text_preview": text_preview,
+                "trim_top_db": TRIM_TOP_DB,
+                "committed_cut_indices": [],
+                "committed_via_tool": False,
+                "final_response_text": final_response_text,
+                "committed_segments": last_segments_feedback,
+                "llm_exception_traceback": llm_exception_traceback,
+                **fallback_meta,
+            },
+            response_cuts=rounds_log,
+            applied_cuts=applied_cuts,
+            carry_over_from_idx=None,
+            error=fallback_reason,
+        )
+        return block_trace, segments
 
     segments, applied_cuts = _emit_llm_slice_segments(
         audio=audio,
@@ -596,6 +663,7 @@ async def _run_llm_slice_group(
         min_seg_sec=min_seg_sec,
         max_seg_sec=max_seg_sec,
         cache=trim_cache,
+        trim_padding_sec=trim_padding_sec,
     )
 
     block_trace = BlockCallTrace(
@@ -787,6 +855,7 @@ def _llm_slice_length_feedback(
     min_seg_sec: float,
     max_seg_sec: float,
     cache: dict[tuple[int, int], LengthCheck],
+    trim_padding_sec: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     marker_by_id = {marker.marker_id: marker for marker in group.markers}
     segments_payload: list[dict[str, Any]] = []
@@ -804,6 +873,7 @@ def _llm_slice_length_feedback(
             min_seg_sec=min_seg_sec,
             max_seg_sec=max_seg_sec,
             cache=cache,
+            trim_padding_sec=trim_padding_sec,
         )
         segments_payload.append(
             {
@@ -827,6 +897,7 @@ def _emit_llm_slice_segments(
     min_seg_sec: float,
     max_seg_sec: float,
     cache: dict[tuple[int, int], LengthCheck],
+    trim_padding_sec: float,
 ) -> tuple[list[RoughSegment], list[dict[str, Any]]]:
     marker_by_id = {marker.marker_id: marker for marker in group.markers}
     segments: list[RoughSegment] = []
@@ -845,6 +916,7 @@ def _emit_llm_slice_segments(
             min_seg_sec=min_seg_sec,
             max_seg_sec=max_seg_sec,
             cache=cache,
+            trim_padding_sec=trim_padding_sec,
         )
         drop = not check.valid
         reason = (
@@ -872,6 +944,153 @@ def _emit_llm_slice_segments(
         )
         prev_end_token_idx = end_token_idx
     return segments, applied_cuts
+
+
+def _priority_silence_v3_llm_slice_fallback(
+    *,
+    audio: np.ndarray,
+    sample_rate: int,
+    chars: Sequence[Any],
+    group: _LlmSliceGroup,
+    min_seg_sec: float,
+    max_seg_sec: float,
+    trim_padding_sec: float,
+) -> tuple[list[RoughSegment], list[dict[str, Any]], str | None, dict[str, Any]]:
+    boundaries = [marker.boundary for marker in group.markers]
+    terminal_boundary = group.markers[-1].boundary
+    meta: dict[str, Any] = {
+        "fallback_boundary_count": len(boundaries),
+        "fallback_chunk_start_idx": int(group.target_first_token_idx),
+        "fallback_chunk_end_idx": int(group.target_last_token_idx),
+    }
+    if not boundaries:
+        return [], [], "priority_silence_v3 chunk fallback found no candidate boundaries", meta
+
+    combined = _priority_v3_combined_percentiles(boundaries)
+    meta.update(
+        {
+            "priority_v3_combined_sample_count": int(combined.count),
+            "priority_v3_combined_is_fallback": bool(combined.is_fallback),
+            "priority_v3_combined_p40_ms": float(combined.p40_ms),
+            "priority_v3_combined_p60_ms": float(combined.p60_ms),
+            "priority_v3_combined_p80_ms": float(combined.p80_ms),
+        }
+    )
+    must_boundaries = [
+        boundary
+        for boundary in boundaries
+        if _priority_v3_must_cut(boundary, combined) or boundary.token_idx == terminal_boundary.token_idx
+    ]
+    must_boundaries = sorted(
+        {boundary.token_idx: boundary for boundary in must_boundaries}.values(),
+        key=lambda boundary: boundary.token_idx,
+    )
+    if not must_boundaries or must_boundaries[-1].token_idx != terminal_boundary.token_idx:
+        return [], [], "priority_silence_v3 chunk fallback found no terminal chunk boundary", meta
+
+    must_regions: list[_PriorityRegion] = []
+    region_start = group.target_first_token_idx
+    for region_end in must_boundaries:
+        if region_start <= region_end.token_idx <= group.target_last_token_idx:
+            must_regions.append(_PriorityRegion(start_token_idx=region_start, end_boundary=region_end))
+        region_start = region_end.token_idx + 1
+    if not must_regions:
+        return [], [], "priority_silence_v3 chunk fallback found no solvable region", meta
+
+    trim_cache: dict[tuple[int, int], float] = {}
+    solved_spans = []
+    current_regions = must_regions
+    phase_specs = [
+        ("combined_p60_strong_cut", _priority_v3_strong_p60_cut, "segments_before_silence", True),
+        ("combined_p60_cut", _priority_v3_p60_cut, "silence_before_segments", False),
+        ("combined_p40_cut", _priority_v3_p40_cut, "silence_before_segments", False),
+    ]
+    for phase, predicate, split_priority, require_internal_candidate in phase_specs:
+        candidates = [
+            boundary
+            for boundary in boundaries
+            if _candidate_in_regions(boundary, current_regions)
+            and predicate(boundary, combined)
+            and not _priority_v3_must_cut(boundary, combined)
+        ]
+        meta[f"fallback_priority_v3_{phase}_candidate_count"] = len(candidates)
+        spans = _solve_priority_regions(
+            audio=audio,
+            sample_rate=sample_rate,
+            chars=chars,
+            regions=current_regions,
+            candidate_boundaries=candidates,
+            phase=f"llm_slice_v1_fallback_{phase}",
+            split_priority=split_priority,
+            require_internal_candidate=require_internal_candidate,
+            min_seg_sec=min_seg_sec,
+            max_seg_sec=max_seg_sec,
+            trim_cache=trim_cache,
+        )
+        solved_spans.extend(spans)
+        current_regions = _subtract_priority_spans(current_regions, spans, chars)
+
+    solved_spans = sorted(solved_spans, key=lambda span: (span.start_token_idx, span.end_boundary.token_idx))
+    all_spans = []
+    for region in must_regions:
+        region_spans = [
+            span
+            for span in solved_spans
+            if region.start_token_idx <= span.start_token_idx <= span.end_boundary.token_idx <= region.end_boundary.token_idx
+        ]
+        all_spans.extend(
+            _priority_leftover_spans(
+                audio=audio,
+                sample_rate=sample_rate,
+                chars=chars,
+                region_start_token_idx=region.start_token_idx,
+                region_end_boundary=region.end_boundary,
+                chosen_spans=region_spans,
+                min_seg_sec=min_seg_sec,
+                max_seg_sec=max_seg_sec,
+                trim_cache=trim_cache,
+            )
+        )
+
+    segments = [
+        dataclasses.replace(segment, reason=f"llm_slice_v1 chunk fallback to {segment.reason}")
+        for segment in (
+            _priority_span_to_segment(span, chars, strategy="priority_silence_v3")
+            for span in all_spans
+        )
+    ]
+    chosen_cuts = [_priority_span_to_cut(span, strategy="priority_silence_v3") for span in all_spans]
+    for cut in chosen_cuts:
+        cut["tool"] = "priority_silence_v3_fallback"
+        cut["fallback_scope"] = "chunk"
+    meta["fallback_priority_v3_must_cut_boundary_count"] = len(must_boundaries)
+    meta["fallback_priority_v3_segment_count"] = len(segments)
+
+    if segments:
+        return segments, chosen_cuts, None, meta
+
+    safety_indices = _llm_slice_fallback_indices(group)
+    safety_cache: dict[tuple[int, int], LengthCheck] = {}
+    safety_segments, safety_cuts = _emit_llm_slice_segments(
+        audio=audio,
+        sample_rate=sample_rate,
+        chars=chars,
+        group=group,
+        indices=safety_indices,
+        min_seg_sec=min_seg_sec,
+        max_seg_sec=max_seg_sec,
+        cache=safety_cache,
+        trim_padding_sec=trim_padding_sec,
+    )
+    for cut in safety_cuts:
+        cut["tool"] = "priority_silence_v3_fallback_safety"
+        cut["fallback_scope"] = "chunk"
+    return (
+        safety_segments,
+        safety_cuts,
+        "priority_silence_v3 chunk fallback produced no spans; used sentence-boundary safety fallback",
+        meta,
+    )
 
 
 def _llm_slice_fallback_indices(group: _LlmSliceGroup) -> list[int]:
@@ -1197,6 +1416,7 @@ def _plan_segments_llm_pause_priority_silence_v2(
     labels_by_candidate_id: dict[int, str],
     min_seg_sec: float,
     max_seg_sec: float,
+    trim_padding_sec: float,
 ) -> tuple[list[RoughSegment], list[dict[str, Any]], Optional[str], dict[str, Any]]:
     if not boundaries:
         return [], [], "no candidate punctuation boundaries found", {}
@@ -1295,6 +1515,7 @@ def _plan_segments_llm_pause_priority_silence_v2(
         "llm_pause_step4_candidate_count": sum(
             1 for b in boundaries if _llm_pause_step(b, prepass, labels_by_candidate_id.get(b.candidate_id, "bad")) == "step4_not_bad"
         ),
+        "trim_padding_sec": trim_padding_sec,
     }
     return segments, chosen_cuts, None, meta
 
@@ -1334,6 +1555,7 @@ async def _plan_one_window(
     block_index: int,
     trim_cache: dict[tuple[int, int], LengthCheck],
     pause_rankings: dict[int, PausePromptRank],
+    trim_padding_sec: float,
 ) -> tuple[list[RoughSegment], BlockCallTrace]:
     prompt_summary = _prompt_summary(
         prepass=prepass,
@@ -1406,6 +1628,7 @@ async def _plan_one_window(
             min_seg_sec=min_seg_sec,
             max_seg_sec=max_seg_sec,
             cache=trim_cache,
+            trim_padding_sec=trim_padding_sec,
         )
         response_cuts.append(
             {
@@ -1477,6 +1700,7 @@ async def _plan_one_window(
                 min_seg_sec=min_seg_sec,
                 max_seg_sec=max_seg_sec,
                 cache=trim_cache,
+                trim_padding_sec=trim_padding_sec,
             )
             response_cuts.append(
                 {
@@ -1519,6 +1743,7 @@ async def _plan_one_window(
                     min_seg_sec=min_seg_sec,
                     max_seg_sec=max_seg_sec,
                     cache=trim_cache,
+                    trim_padding_sec=trim_padding_sec,
                 )
                 segment = _make_segment(
                     start_idx,
@@ -1589,6 +1814,7 @@ async def _plan_one_window(
                 min_seg_sec=min_seg_sec,
                 max_seg_sec=max_seg_sec,
                 cache=trim_cache,
+                trim_padding_sec=trim_padding_sec,
             )
             for i, proposal in enumerate(proposals)
         ]
@@ -1647,6 +1873,7 @@ async def _plan_one_window(
         min_seg_sec=min_seg_sec,
         max_seg_sec=max_seg_sec,
         cache=trim_cache,
+        trim_padding_sec=trim_padding_sec,
     )
     return fallback_segments, _make_trace(
         block_index=block_index,
@@ -1689,6 +1916,7 @@ def _fallback_segments(
     min_seg_sec: float,
     max_seg_sec: float,
     cache: dict[tuple[int, int], LengthCheck],
+    trim_padding_sec: float,
 ) -> tuple[list[RoughSegment], list[LengthCheck], str]:
     if latest_format_ok_segments:
         segments: list[RoughSegment] = []
@@ -1704,6 +1932,7 @@ def _fallback_segments(
                 min_seg_sec=min_seg_sec,
                 max_seg_sec=max_seg_sec,
                 cache=cache,
+                trim_padding_sec=trim_padding_sec,
             )
             checks.append(check)
             segments.append(
@@ -1729,6 +1958,7 @@ def _fallback_segments(
             min_seg_sec=min_seg_sec,
             max_seg_sec=max_seg_sec,
             cache=cache,
+            trim_padding_sec=trim_padding_sec,
         )
         return (
             [_make_segment(start_idx, fallback_cut_idx, check, drop=True, reason="fallback discarded latest cut")],
@@ -1746,6 +1976,7 @@ def _fallback_segments(
         min_seg_sec=min_seg_sec,
         max_seg_sec=max_seg_sec,
         cache=cache,
+        trim_padding_sec=trim_padding_sec,
     )
     return (
         [
@@ -2241,6 +2472,7 @@ def _check_length(
     min_seg_sec: float,
     max_seg_sec: float,
     cache: dict[tuple[int, int], LengthCheck],
+    trim_padding_sec: float,
 ) -> LengthCheck:
     start_idx = max(0, min(start_idx, len(chars) - 1))
     end_idx = max(start_idx, min(end_idx, len(chars) - 1))
@@ -2262,7 +2494,7 @@ def _check_length(
         if trimmed.size == 0 or len(index) != 2 or int(index[1]) <= int(index[0]):
             trimmed_sec = 0.0
         else:
-            pad = max(0, int(round(TRIM_PADDING_SEC * sample_rate)))
+            pad = max(0, int(round(float(trim_padding_sec) * sample_rate)))
             trim_start = max(0, int(index[0]) - pad)
             trim_end = min(len(seg_audio), int(index[1]) + pad)
             trimmed_sec = max(0.0, (trim_end - trim_start) / float(sample_rate))

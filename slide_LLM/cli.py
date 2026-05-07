@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from llm_gateway.models import ProviderName
-from slide_rule.config import AUDIO_EXTENSIONS
+from slide_rule.config import AUDIO_EXTENSIONS, DEFAULT_THIN_CUT_PADDING_SEC
 
 from .config import LLMWorkflowConfig
 
@@ -96,6 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vad-min-speech-ms", type=int, default=250)
     parser.add_argument("--vad-min-silence-ms", type=int, default=300)
     parser.add_argument("--vad-speech-pad-ms", type=int, default=200)
+    parser.add_argument(
+        "--thin-cut-padding-sec",
+        type=float,
+        default=DEFAULT_THIN_CUT_PADDING_SEC,
+        help="Seconds of audio to keep before/after librosa thin-cut trim. Default: 0.2.",
+    )
     return parser
 
 
@@ -124,6 +130,8 @@ def args_to_config(args: argparse.Namespace) -> LLMWorkflowConfig:
         raise SystemExit("--llm-concurrency must be > 0.")
     if args.llm_max_rounds <= 0:
         raise SystemExit("--llm-max-rounds must be > 0.")
+    if args.thin_cut_padding_sec < 0:
+        raise SystemExit("--thin-cut-padding-sec must be >= 0.")
 
     return LLMWorkflowConfig(
         input_path=input_path,
@@ -169,6 +177,7 @@ def args_to_config(args: argparse.Namespace) -> LLMWorkflowConfig:
         vad_min_speech_ms=args.vad_min_speech_ms,
         vad_min_silence_ms=args.vad_min_silence_ms,
         vad_speech_pad_ms=args.vad_speech_pad_ms,
+        thin_cut_padding_sec=args.thin_cut_padding_sec,
     )
 
 

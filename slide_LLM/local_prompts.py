@@ -79,6 +79,7 @@ LLM_SLICE_SYSTEM_PROMPT = (
     "(clause, list item, contrast, cause/effect, discourse beat).\n"
     "- Do NOT cut where it would break a coherent unit (subject from verb, fixed phrase, "
     "preposition from object, conjunction from following clause), even if length would be valid.\n"
+    "- Avoid cutting around very short pause/short pause just to make segment length valid. "
     "- It is acceptable for some segments to be rejected when no semantically clean cut fits the length range; "
     "those rejected segments are simply dropped, while the others are kept. "
     "Do NOT introduce a semantically bad cut just to keep more audio.\n"
@@ -235,6 +236,11 @@ def build_llm_slice_base_prompt(
             "After submit_slices returns segment lengths and keep states, either call submit_slices again "
             "with improved cut_indices or call confirm_slices with no parameters. "
             "The latest valid submit_slices call before confirm_slices is the final decision."
+        ),
+        "cut_quality_rule": (
+            "Avoid cutting around weak boundaries just to make segment length valid. "
+            "Weak comma-like boundaries with short pauses should be skipped or allowed to create rejected spans "
+            "unless the cut is semantically natural and audio-pause-safe."
         ),
     }
 
